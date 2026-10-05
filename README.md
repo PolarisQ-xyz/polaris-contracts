@@ -23,7 +23,7 @@ This is one of three repos that make up Polaris:
 
 | Contract | Address |
 |---|---|
-| Capital-efficiency vault | [`CDDZCX5PT7FURKHTHNKXGNJJNURS4M7BLLNS6BHRV4RJM6CJT25SNCF5`](https://stellar.expert/explorer/testnet/contract/CDDZCX5PT7FURKHTHNKXGNJJNURS4M7BLLNS6BHRV4RJM6CJT25SNCF5) |
+| Capital-efficiency vault | [`CDAZVYBSONMRKSXILQGYWIMDHIAWNWISBOEEPU6EG7RUBJPGHP6VZZBW`](https://stellar.expert/explorer/testnet/contract/CDAZVYBSONMRKSXILQGYWIMDHIAWNWISBOEEPU6EG7RUBJPGHP6VZZBW) (redeployed — see `polaris-oracle`'s README, bug 16, for why the original instance was abandoned rather than reused) |
 | Smart-wallet factory | [`CCLDHPEJBENBV3GRZRHO7RH5OZRTBWP7DWB36L3OCWLKEEAP6FJTTJ5U`](https://stellar.expert/explorer/testnet/contract/CCLDHPEJBENBV3GRZRHO7RH5OZRTBWP7DWB36L3OCWLKEEAP6FJTTJ5U) |
 | Mock RedStone (testnet stand-in) | [`CAFAVGX6VUIRPK2KDCK7QGJEOOBM2EWCIA5UJBLOR2T7HZINKVKYRYTI`](https://stellar.expert/explorer/testnet/contract/CAFAVGX6VUIRPK2KDCK7QGJEOOBM2EWCIA5UJBLOR2T7HZINKVKYRYTI) |
 
@@ -307,6 +307,14 @@ not fractional LP shares. Multiple depositors can `deposit`, but there's no
 proportional-withdrawal accounting yet — a real multi-LP product needs
 share accounting before this is safe to open past a single trusted
 operator ([tracked as an open issue](https://github.com/only1dreamgene/polaris-contracts/issues/2)).
+**A second, equally real consequence of v1's simplicity**: `admin` is set
+once at `initialize()` and the contract has no rotation function at all —
+confirmed the hard way when a production signing-key rotation (see
+`polaris-oracle`'s README, bug 16) permanently locked the first deployed
+vault instance out of its own funds, with no way to recover access short
+of abandoning it and deploying a fresh one. Worth an admin-rotation
+entrypoint in a future round, same honesty-about-scope as the
+single-LP-share gap above.
 
 Verified live on testnet, the full loop: deployed the vault above,
 deposited 20,000,000 stroops, withdrew 10,000,000 of it to seed a real
