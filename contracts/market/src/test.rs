@@ -705,6 +705,158 @@ fn settle_accepts_a_small_divergence_within_tolerance() {
     assert_eq!(client.get_market().status, MarketStatus::ResolvedYes);
 }
 
+// ---------- settle_via_reflector: Lazer-free settlement ----------
+//
+// Added when Pyth Lazer's public access moved behind a paid subscription —
+// Reflector was already a trusted, free, on-chain, no-API-key dependency
+// (it's required every real settle() call already corroborates against),
+// so this promotes it from corroborator to primary reference price for
+// deployments that can't or won't pay for Lazer access. Same preconditions,
+// same fail-closed discipline, same payout mechanics as `settle` — these
+// tests mirror the Lazer-path tests above one-for-one.
+
+#[test]
+fn settle_via_reflector_yes_wins_on_price_at_or_above_strike() {
+    let h = setup(1_000_000, 10_000); // strike = $10,000.00
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    let shares = client.buy(&user, &Prediction::Yes, &1_000, &0);
+
+    h.env.ledger().set_timestamp(h.expiry);
+    set_reflector_price_cents(&h, 1_000_000); // exactly at strike
+    client.settle_via_reflector();
+
+    let m = client.get_market();
+    assert_eq!(m.status, MarketStatus::ResolvedYes); // inclusive >= rule, same as settle()
+    assert_eq!(m.final_price, 1_000_000);
+
+    let before = token::Client::new(&h.env, &h.token_id).balance(&user);
+    let payout = client.redeem(&user);
+    assert_eq!(payout, shares);
+    let after = token::Client::new(&h.env, &h.token_id).balance(&user);
+    assert_eq!(after - before, shares);
+
+    assert_solvent(&h);
+}
+
+#[test]
+fn settle_via_reflector_no_wins_below_strike() {
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+    set_reflector_price_cents(&h, 999_900); // $9,999.00
+    client.settle_via_reflector();
+    assert_eq!(client.get_market().status, MarketStatus::ResolvedNo);
+    assert_solvent(&h);
+}
+
+#[test]
+fn settle_via_reflector_rejects_before_expiry() {
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    set_reflector_price_cents(&h, 1_000_000);
+    let res = client.try_settle_via_reflector();
+    assert_eq!(res, Err(Ok(Error::ExpiryNotReached)));
+}
+
+#[test]
+fn settle_via_reflector_rejects_when_reflector_has_no_price_yet() {
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+    let res = client.try_settle_via_reflector();
+    assert_eq!(res, Err(Ok(Error::ReflectorPriceUnavailable)));
+    assert_eq!(client.get_market().status, MarketStatus::Open);
+}
+
+#[test]
+fn settle_via_reflector_rejects_a_stale_price() {
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+    let stale_ts = h.expiry - REFLECTOR_MAX_STALENESS_SECS - 1;
+    let reflector_client = mock_sep40::MockSep40Client::new(&h.env, &h.reflector_id);
+    reflector_client.set_price(&(1_000_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &stale_ts);
+    let res = client.try_settle_via_reflector();
+    assert_eq!(res, Err(Ok(Error::ReflectorPriceStale)));
+    assert_eq!(client.get_market().status, MarketStatus::Open);
+}
+
+#[test]
+fn settle_via_reflector_rejects_a_price_that_predates_expiry_by_more_than_the_freshness_window() {
+    // Distinct from plain staleness: a price timestamped just outside
+    // PRICE_FRESHNESS_WINDOW_SECS *before expiry* is still well within
+    // max_staleness_secs of `now` (expiry itself, here) — this must still
+    // reject, the same freshness-near-expiry bound the Lazer path enforces.
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    let old_ts = h.expiry - PRICE_FRESHNESS_WINDOW_SECS - 1;
+    let reflector_client = mock_sep40::MockSep40Client::new(&h.env, &h.reflector_id);
+    reflector_client.set_price(&(1_000_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &old_ts);
+    h.env.ledger().set_timestamp(h.expiry);
+    let res = client.try_settle_via_reflector();
+    assert_eq!(res, Err(Ok(Error::StalePrice)));
+}
+
+#[test]
+fn settle_via_reflector_rejects_decimals_drift_since_initialize() {
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+    let reflector_client = mock_sep40::MockSep40Client::new(&h.env, &h.reflector_id);
+    reflector_client.set_decimals(&(REFLECTOR_DECIMALS + 1));
+    reflector_client.set_price(&(1_000_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &h.expiry);
+    let res = client.try_settle_via_reflector();
+    assert_eq!(res, Err(Ok(Error::ReflectorDecimalsChanged)));
+}
+
+#[test]
+fn double_settle_via_reflector_rejected() {
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+    set_reflector_price_cents(&h, 1_000_000);
+    client.settle_via_reflector();
+    let res = client.try_settle_via_reflector();
+    assert_eq!(res, Err(Ok(Error::AlreadyFinalized)));
+}
+
+#[test]
+fn settle_via_reflector_and_settle_are_mutually_exclusive_once_one_finalizes() {
+    // Whichever path finalizes first wins — the other path must then see
+    // an already-finalized market, not a second, conflicting resolution.
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+    set_reflector_price_cents(&h, 1_000_000);
+    client.settle_via_reflector();
+
+    let payload = build_payload(FEED_ID, 10_000_00000000, -8, h.expiry * 1_000_000);
+    let bytes = Bytes::from_slice(&h.env, &payload);
+    let res = client.try_settle(&bytes);
+    assert_eq!(res, Err(Ok(Error::AlreadyFinalized)));
+}
+
+#[test]
+fn settle_via_reflector_still_requires_redstone_agreement_when_configured() {
+    // Unanimous, not "Reflector alone is always enough once promoted to
+    // primary" — mirrors settle()'s own RedStone unanimity requirement.
+    let (h, redstone_id) = setup_with_redstone(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+    set_reflector_price_cents(&h, 1_000_000); // $10,000.00
+    set_redstone_price_cents(&h.env, &redstone_id, 2_000_000); // $20,000.00 — gross divergence
+
+    let res = client.try_settle_via_reflector();
+    assert_eq!(res, Err(Ok(Error::OracleDivergence)));
+    assert_eq!(client.get_market().status, MarketStatus::Open);
+
+    set_redstone_price_cents(&h.env, &redstone_id, 1_000_000); // corrected to agree
+    client.settle_via_reflector();
+    assert_eq!(client.get_market().status, MarketStatus::ResolvedYes);
+}
+
 // ---------- on-chain RedStone cross-check (optional third leg) ----------
 
 #[test]

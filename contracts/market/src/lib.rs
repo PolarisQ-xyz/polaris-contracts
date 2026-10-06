@@ -61,8 +61,8 @@ use pyth_lazer_stellar_sdk::PythLazerClient;
 // this crate's full test suite after touching this file; every number
 // must come out identical).
 use polaris_ctf_math::{
-    apply_fee, cpmm_out, cpmm_sell_out, effective_fee_bps as shared_effective_fee_bps, sep40::Sep40Client,
-    to_cents, verify_oracle_corroboration, OracleCheckError, OracleFeedConfig,
+    apply_fee, cpmm_out, cpmm_sell_out, effective_fee_bps as shared_effective_fee_bps, reflector_price_to_cents,
+    sep40::Sep40Client, to_cents, verify_oracle_corroboration, OracleCheckError, OracleFeedConfig,
 };
 
 /// Protocol fee ceiling: 1000 bps = 10%.
@@ -676,6 +676,83 @@ impl PolarisMarket {
             )?;
         }
 
+        Self::finalize_settlement(&env, &mut m, final_cents);
+        Ok(())
+    }
+
+    /// A second, independent settlement path for when no Pyth Lazer
+    /// payload is available at all — not a degraded fallback, a genuinely
+    /// real one: Reflector Network is itself a live, decentralized,
+    /// on-chain price oracle, the same one `settle()` has always required
+    /// to *corroborate* Lazer before finalizing. This entrypoint just
+    /// promotes it from corroborator to the reference price directly,
+    /// reusing the exact same freshness/decimals-pin discipline that path
+    /// already enforces — see `polaris-oracle`'s README for why this
+    /// exists (Pyth Lazer's public access now requires a paid
+    /// subscription; Reflector is free and was already trusted equally).
+    ///
+    /// Deliberately a **separate function**, not an `Option<Bytes>`
+    /// parameter on `settle()` itself: the two paths verify genuinely
+    /// different things (a cryptographic payload signature vs. a live
+    /// contract read), and collapsing them into one entrypoint with a
+    /// branch would make it easy to silently accept whichever path is
+    /// convenient rather than whichever was actually intended by the
+    /// caller. Same preconditions, same payout mechanics, same fail-closed
+    /// behavior on stale/unavailable/drifted data as the Lazer path.
+    pub fn settle_via_reflector(env: Env) -> Result<(), Error> {
+        let mut m = load_market(&env)?;
+        if m.status != MarketStatus::Open {
+            return Err(Error::AlreadyFinalized);
+        }
+        let now = env.ledger().timestamp();
+        if now < m.expiry {
+            return Err(Error::ExpiryNotReached);
+        }
+
+        let client = Sep40Client::new(&env, &m.reflector.contract);
+        let price = client.lastprice(&m.reflector.asset).ok_or(Error::ReflectorPriceUnavailable)?;
+        if price.timestamp + m.reflector.max_staleness_secs < now {
+            return Err(Error::ReflectorPriceStale);
+        }
+        // Same "timestamped near expiry, not just not-stale-right-now"
+        // bound the Lazer path enforces via PRICE_FRESHNESS_WINDOW_SECS —
+        // a price that's merely within max_staleness_secs of `now` could
+        // still predate `expiry` by an unbounded amount if settle() is
+        // called long after expiry on a stalled feed.
+        if price.timestamp + PRICE_FRESHNESS_WINDOW_SECS < m.expiry {
+            return Err(Error::StalePrice);
+        }
+        let decimals = client.decimals();
+        if decimals != m.reflector_decimals_at_init {
+            return Err(Error::ReflectorDecimalsChanged);
+        }
+        let final_cents = reflector_price_to_cents(price.price, decimals);
+
+        // If a third leg (RedStone) is configured, it must still agree —
+        // unanimous, not "Reflector alone is always enough once it's
+        // promoted to primary." Mirrors settle()'s own RedStone check
+        // exactly, just corroborating against Reflector's price instead
+        // of Lazer's.
+        if let Some(redstone) = load_redstone_oracle(&env) {
+            verify_oracle_corroboration(&env, &redstone.config, redstone.decimals_at_init, now, final_cents).map_err(
+                |e| match e {
+                    OracleCheckError::Unavailable => Error::RedstonePriceUnavailable,
+                    OracleCheckError::Stale => Error::RedstonePriceStale,
+                    OracleCheckError::DecimalsInvalid => Error::RedstoneDecimalsInvalid,
+                    OracleCheckError::DecimalsChanged => Error::RedstoneDecimalsChanged,
+                    OracleCheckError::Divergent => Error::OracleDivergence,
+                },
+            )?;
+        }
+
+        Self::finalize_settlement(&env, &mut m, final_cents);
+        Ok(())
+    }
+
+    /// Shared tail of both settlement paths (`settle`/`settle_via_reflector`)
+    /// — once a final price has cleared every configured oracle check,
+    /// finalizing is identical regardless of which path produced it.
+    fn finalize_settlement(env: &Env, m: &mut Market, final_cents: i128) {
         m.final_price = final_cents;
         m.status = if final_cents >= m.strike_price {
             MarketStatus::ResolvedYes
@@ -683,15 +760,14 @@ impl PolarisMarket {
             MarketStatus::ResolvedNo
         };
 
-        credit(&env, Prediction::Yes, &m.treasury, m.pool_yes);
-        credit(&env, Prediction::No, &m.treasury, m.pool_no);
+        credit(env, Prediction::Yes, &m.treasury, m.pool_yes);
+        credit(env, Prediction::No, &m.treasury, m.pool_no);
         m.pool_yes = 0;
         m.pool_no = 0;
 
-        save_market(&env, &m);
+        save_market(env, m);
         env.events()
             .publish((symbol_short!("settle"),), (m.status, final_cents));
-        Ok(())
     }
 
     /// Permissionless liveness backstop: if nobody ever settles, anyone can

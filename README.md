@@ -47,6 +47,7 @@ app is at
 - [Passkey smart wallets](#passkey-smart-wallets)
 - [The capital-efficiency vault](#the-capital-efficiency-vault)
 - [On-chain second-oracle: Reflector Network](#on-chain-second-oracle-reflector-network)
+- [A second settlement path: settle_via_reflector](#a-second-settlement-path-settle_via_reflector)
 - [A third oracle: RedStone](#a-third-oracle-redstone)
 - [The perpetual contract](#the-perpetual-contract)
 - [Engineering notes: soroban-sdk gotchas](#engineering-notes-soroban-sdk-gotchas)
@@ -135,6 +136,10 @@ WASM contract) for continuous pricing between the two outcome shares.
   the Pyth Lazer payload on-chain via `pyth-lazer-stellar-sdk`, reads the
   configured feed, checks the price is timestamped within ±5 minutes of
   expiry, and marks the winning side (`>=` strike → YES, inclusive).
+- **`settle_via_reflector()`** — a second, payload-free settlement path for
+  when no Lazer access is configured at all; see
+  [A second settlement path](#a-second-settlement-path-settle_via_reflector)
+  below.
 - **`cancel()`** — the liveness backstop. Permissionless once
   `expiry + grace_period` has passed with no settlement. Every holder can
   then redeem — see [Cancellation payout](#cancellation-payout) for why
@@ -358,6 +363,36 @@ unconditional liveness backstop, so a market that can never get Reflector
 agreement cancels and refunds through the exact same well-tested path
 every other unresolvable market already uses.
 
+## A second settlement path: `settle_via_reflector`
+
+`settle(payload)` requires a cryptographically-signed Pyth Lazer payload —
+real, but Pyth's public Lazer access moved behind a paid subscription
+(Starter tier, $500/month minimum) after this project was first built,
+making it unavailable to a deployment that can't pay for it.
+`settle_via_reflector()` is a second, independent entrypoint added for
+exactly that case: no payload, no signature to verify — it reads
+Reflector's live on-chain price directly as the reference price instead of
+merely corroborating against it. Same preconditions as `settle` (status
+`Open`, `now >= expiry`), same fail-closed discipline (stale/unavailable
+Reflector data, or a disagreeing RedStone leg if one is configured, both
+reject outright), same payout mechanics — the two paths share a private
+`finalize_settlement` helper so there's exactly one place that logic lives.
+
+**Deliberately a separate function, not a parameter on `settle` itself**:
+the two paths verify genuinely different things (a cryptographic signature
+vs. a live contract read), and collapsing them into one entrypoint with a
+branch would make it easy to silently accept whichever path is convenient
+rather than whichever was actually intended by the caller.
+
+This is not a downgrade dressed up as equivalent — Reflector was already
+the mandatory, equally-trusted corroborating leg every `settle()` call has
+always required; this just promotes it to primary reference price when no
+Lazer payload exists at all. `polaris-oracle`'s `MarketService.trySettle`
+tries this path first whenever no `PYTH_LAZER_TOKEN` is configured, only
+falling through to the permissionless `cancel` liveness backstop if
+Reflector itself is also unavailable/stale/divergent, or the market was
+deployed from a wasm older than this function's existence.
+
 ## A third oracle: RedStone
 
 `settle`/`record_price_checkpoint` can optionally corroborate against a
@@ -474,7 +509,7 @@ live.
 ## Building & testing
 
 ```sh
-# unit tests (native target; 86 across the whole workspace)
+# unit tests (native target; 96 across the whole workspace)
 cargo test --workspace
 
 # release WASM (requires `rustup target add wasm32v1-none`)
@@ -490,14 +525,14 @@ shasum -a 256 target/wasm32v1-none/release/*.wasm
 
 | Crate | Unit tests |
 |---|---|
-| `polaris-market` | 38 |
+| `polaris-market` | 48 |
 | `polaris-perpetual` | 22 |
 | `polaris-smart-wallet` | 8 |
 | `polaris-smart-wallet-factory` | 8 |
 | `polaris-vault` | 6 |
 | `polaris-mock-redstone` | 3 |
 | `polaris-mock-lazer` | 1 |
-| **Total** | **86** |
+| **Total** | **96** |
 
 Current build (regenerate after any contract change — `polaris-oracle`'s
 `MARKET_WASM_HASH`/`PERPETUAL_WASM_HASH` must track whatever hash is
@@ -505,7 +540,7 @@ actually uploaded):
 
 | Contract | Size | SHA-256 |
 |---|---|---|
-| `polaris_market.wasm` | 57,617 bytes | `6c99075c91ed438833595bd032b8ec6024a1d638256504aa6c7c6837f01fa9fc` |
+| `polaris_market.wasm` | 59,432 bytes | `da91d0c96215ca6c9744dc6e678299132061e749e945de206e4ff8f725d967be` |
 | `polaris_perpetual.wasm` | 57,367 bytes | `b62909fa2c78b083a8973b7b733b0ce9e4b8cdb1efd1d0169f61c93370af9727` |
 | `polaris_mock_lazer.wasm` | 649 bytes | `7840d96cc309b74e37b5ec22f37e978eaec0aef3feb00146a6e8ce3bdee7087d` |
 | `polaris_mock_redstone.wasm` | 7,280 bytes | `0db6ff0394999bb28e97a786c5b64891f341290aa323d8a8aec78b711eb28cdf` |
