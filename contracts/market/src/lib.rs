@@ -665,15 +665,8 @@ impl PolarisMarket {
             },
         )?;
         if let Some(redstone) = load_redstone_oracle(&env) {
-            verify_oracle_corroboration(&env, &redstone.config, redstone.decimals_at_init, now, final_cents).map_err(
-                |e| match e {
-                    OracleCheckError::Unavailable => Error::RedstonePriceUnavailable,
-                    OracleCheckError::Stale => Error::RedstonePriceStale,
-                    OracleCheckError::DecimalsInvalid => Error::RedstoneDecimalsInvalid,
-                    OracleCheckError::DecimalsChanged => Error::RedstoneDecimalsChanged,
-                    OracleCheckError::Divergent => Error::OracleDivergence,
-                },
-            )?;
+            verify_oracle_corroboration(&env, &redstone.config, redstone.decimals_at_init, now, final_cents)
+                .map_err(Self::map_redstone_error)?;
         }
 
         Self::finalize_settlement(&env, &mut m, final_cents);
@@ -734,19 +727,26 @@ impl PolarisMarket {
         // exactly, just corroborating against Reflector's price instead
         // of Lazer's.
         if let Some(redstone) = load_redstone_oracle(&env) {
-            verify_oracle_corroboration(&env, &redstone.config, redstone.decimals_at_init, now, final_cents).map_err(
-                |e| match e {
-                    OracleCheckError::Unavailable => Error::RedstonePriceUnavailable,
-                    OracleCheckError::Stale => Error::RedstonePriceStale,
-                    OracleCheckError::DecimalsInvalid => Error::RedstoneDecimalsInvalid,
-                    OracleCheckError::DecimalsChanged => Error::RedstoneDecimalsChanged,
-                    OracleCheckError::Divergent => Error::OracleDivergence,
-                },
-            )?;
+            verify_oracle_corroboration(&env, &redstone.config, redstone.decimals_at_init, now, final_cents)
+                .map_err(Self::map_redstone_error)?;
         }
 
         Self::finalize_settlement(&env, &mut m, final_cents);
         Ok(())
+    }
+
+    /// Maps the optional RedStone leg's `OracleCheckError` to this
+    /// contract's `Error` enum. Shared by `settle()` and
+    /// `settle_via_reflector()`, which both corroborate against the same
+    /// optional RedStone oracle and need the identical mapping.
+    fn map_redstone_error(e: OracleCheckError) -> Error {
+        match e {
+            OracleCheckError::Unavailable => Error::RedstonePriceUnavailable,
+            OracleCheckError::Stale => Error::RedstonePriceStale,
+            OracleCheckError::DecimalsInvalid => Error::RedstoneDecimalsInvalid,
+            OracleCheckError::DecimalsChanged => Error::RedstoneDecimalsChanged,
+            OracleCheckError::Divergent => Error::OracleDivergence,
+        }
     }
 
     /// Shared tail of both settlement paths (`settle`/`settle_via_reflector`)
