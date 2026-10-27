@@ -1,6 +1,6 @@
 # polaris-contracts
 
-[![CI](https://github.com/only1dreamgene/polaris-contracts/actions/workflows/ci.yml/badge.svg)](https://github.com/only1dreamgene/polaris-contracts/actions/workflows/ci.yml)
+[![CI](https://github.com/PolarisQ-xyz/polaris-contracts/actions/workflows/ci.yml/badge.svg)](https://github.com/PolarisQ-xyz/polaris-contracts/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Soroban SDK](https://img.shields.io/badge/soroban--sdk-26.1.0-7D5FFF)](https://crates.io/crates/soroban-sdk)
 
@@ -16,8 +16,8 @@ This is one of three repos that make up Polaris:
 | Repo | Role |
 |---|---|
 | **polaris-contracts** (this repo) | The on-chain rules: markets, perpetuals, the LP vault, passkey wallets |
-| [polaris-oracle](https://github.com/only1dreamgene/polaris-oracle) | NestJS backend — settlement automation, multi-oracle price relay, sponsored transactions, admin API |
-| [polaris-frontend](https://github.com/only1dreamgene/polaris-frontend) | Next.js web app — trading UI, portfolio, embeddable widget, admin dashboard |
+| [polaris-oracle](https://github.com/PolarisQ-xyz/polaris-oracle) | NestJS backend — settlement automation, multi-oracle price relay, sponsored transactions, admin API |
+| [polaris-frontend](https://github.com/PolarisQ-xyz/polaris-frontend) | Next.js web app — trading UI, portfolio, embeddable widget, admin dashboard |
 
 ## Live on testnet
 
@@ -30,7 +30,7 @@ This is one of three repos that make up Polaris:
 Individual market/perpetual contracts are deployed on demand by
 `polaris-oracle` (each market is its own contract instance) — the live
 backend driving those deploys is at
-[polaris-oracle.fly.dev](https://polaris-oracle.fly.dev), and the running
+[polaris-oracle-api.fly.dev](https://polaris-oracle-api.fly.dev), and the running
 app is at
 [polaris-frontend-delta.vercel.app](https://polaris-frontend-delta.vercel.app).
 
@@ -311,7 +311,7 @@ independently collateralized as it already was.
 not fractional LP shares. Multiple depositors can `deposit`, but there's no
 proportional-withdrawal accounting yet — a real multi-LP product needs
 share accounting before this is safe to open past a single trusted
-operator ([tracked as an open issue](https://github.com/only1dreamgene/polaris-contracts/issues/2)).
+operator ([tracked as an open issue](https://github.com/PolarisQ-xyz/polaris-contracts/issues/2)).
 **A second, equally real consequence of v1's simplicity**: `admin` is set
 once at `initialize()` and the contract has no rotation function at all —
 confirmed the hard way when a production signing-key rotation (see
