@@ -32,7 +32,7 @@ Individual market/perpetual contracts are deployed on demand by
 backend driving those deploys is at
 [polaris-oracle-api.fly.dev](https://polaris-oracle-api.fly.dev), and the running
 app is at
-[polaris-frontend-delta.vercel.app](https://polaris-frontend-delta.vercel.app).
+[polaris-frontend-iota.vercel.app](https://polaris-frontend-iota.vercel.app).
 
 ## Contents
 
