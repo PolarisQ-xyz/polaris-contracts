@@ -672,3 +672,11 @@ that applies to fund-safety-critical code.
 ## License
 
 [MIT](./LICENSE)
+
+## Handsoff notes
+
+<!-- handsoff-issue-134 -->
+- #134: contracts/market: every trade rewrites the whole Market struct, including immutable config, to instance storage
+
+<!-- handsoff-issue-135 -->
+- #135: contracts/market+perpetual: buy() succeeds with amount_out == 0, unlike sell(), which rejects a zero output
