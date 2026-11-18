@@ -140,6 +140,41 @@ In general, a PR should:
 - Not break `cargo test --workspace`.
 - Update the README/doc comments if it changes documented behavior.
 
+## State archival and restore
+
+Soroban persistent and instance storage entries expire if they are not
+bumped. This repo's contracts only extend TTLs on specific paths, so a
+contributor touching balances, positions, or the smart wallet should
+understand the archival model before changing anything in that area.
+
+- **Share balances** (`contracts/market` and `contracts/perpetual`) are
+  persistent entries. They get `extend_ttl(BUMP_THRESHOLD, BUMP_TO)`
+  (roughly 31 days) only when written — e.g. `set_balance`. Read paths
+  such as `balance_of` do **not** extend the TTL. A holder who buys and
+  then does nothing for ~31 days will have their balance entry archived.
+- **Smart-wallet instance storage** is only touched in `init` and on a
+  successful `__check_auth`. An idle passkey wallet can therefore be
+  archived after ~31 days of inactivity.
+
+When an entry is archived, calls that need it (`sell`, `redeem`, or
+`__check_auth`) fail until the entry is restored. **Funds are not lost** —
+the data is still on-chain, just archived. The restore procedure is to
+submit a Soroban `RestoreFootprint` operation for the archived entries
+before retrying the call. `polaris-oracle` is expected to prepend these
+restore operations automatically when simulation reports archived
+entries; until that lands, the backend (or the user) must submit them
+manually.
+
+On-chain mitigation is deliberately **not** implemented yet: neither
+`extend_ttl` on the `redeem`/`get_position` paths nor a permissionless
+`bump(user)` entrypoint exists today. The decision recorded for #147 is
+to handle restoration off-chain (oracle/backend) first and revisit an
+on-chain bump helper only if the off-chain flow proves insufficient —
+adding TTL bumps to read paths would make cheap reads cost writes, and a
+permissionless `bump(user)` needs its own griefing/cost analysis before
+it can be added safely. If you propose either, open an issue first and
+expect the same fund-safety review bar as any balance-touching change.
+
 ## Copyright
 
 By contributing, you agree to license your work under the [MIT

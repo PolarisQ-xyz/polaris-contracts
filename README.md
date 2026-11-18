@@ -672,3 +672,11 @@ that applies to fund-safety-critical code.
 ## License
 
 [MIT](./LICENSE)
+
+## Handsoff notes
+
+<!-- handsoff-issue-146 -->
+- #146: contracts/market+perpetual: get_price() rounding and its post-resolution behavior are untested
+
+<!-- handsoff-issue-149 -->
+- #149: contracts/market: both settlement paths are always callable, so the caller picks Lazer or Reflector with no per-market restriction
