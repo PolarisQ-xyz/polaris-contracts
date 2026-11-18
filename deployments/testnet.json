@@ -1,0 +1,27 @@
+{
+  "network": "testnet",
+  "generated_from": "deployments/testnet.json",
+  "contracts": [
+    {
+      "contract": "vault",
+      "id": "CDAZVYBSONMRKSXILQGYWIMDHIAWNWISBOEEPU6EG7RUBJPGHP6VZZBW",
+      "wasm_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "deployed_at": "2025-01-01T00:00:00Z",
+      "superseded_by": null
+    },
+    {
+      "contract": "factory",
+      "id": "CCBVJYZWNEOQTY6KVCPZ2G6YJ7QTBPUEO6IE6YT7J2QZDQW2Q5Z43VQY",
+      "wasm_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "deployed_at": "2025-01-01T00:00:00Z",
+      "superseded_by": null
+    },
+    {
+      "contract": "mock-redstone",
+      "id": "CAFAVGX6VUIRPK2KDCK7QGJEOOBM2EWCIA5UJBLOR2T7HZINKVKYRYTI",
+      "wasm_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "deployed_at": "2025-01-01T00:00:00Z",
+      "superseded_by": null
+    }
+  ]
+}

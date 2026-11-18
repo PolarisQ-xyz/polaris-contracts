@@ -672,3 +672,8 @@ that applies to fund-safety-critical code.
 ## License
 
 [MIT](./LICENSE)
+
+## Handsoff notes
+
+<!-- handsoff-issue-144 -->
+- #144: contracts/market: redeem() requires the holder's auth even though the payout always goes to the holder, so keepers can't auto-pay winners

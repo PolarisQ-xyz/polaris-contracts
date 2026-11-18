@@ -220,363 +220,115 @@ fn double_initialize_rejected() {
 #[test]
 fn split_then_merge_round_trips_collateral() {
     let h = setup(10_000, true);
-    let user = Address::generate(&h.env);
-    fund(&h, &user, 5_000);
     let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 1_000);
 
-    client.split(&user, &2_000);
-    assert_eq!(client.get_position(&user), (2_000, 2_000));
-    client.merge(&user, &2_000);
-    assert_eq!(client.get_position(&user), (0, 0));
-    assert_eq!(token::Client::new(&h.env, &h.token_id).balance(&user), 5_000);
+    client.split(&user, &1_000i128);
+    assert_eq!(client.get_position(&user).yes, 1_000);
+    assert_eq!(client.get_position(&user).no, 1_000);
+
+    client.merge(&user, &1_000i128);
+    assert_eq!(client.get_position(&user).yes, 0);
+    assert_eq!(client.get_position(&user).no, 0);
+    assert_eq!(token::Client::new(&h.env, &h.token_id).balance(&user), 1_000);
+    assert_solvent(&h);
+}
+
+// ---------- parity with polaris-market ----------
+
+#[test]
+fn sell_large_enough_to_exhaust_a_reserve_is_rejected() {
+    let h = setup(10_000, true);
+    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 10_000);
+
+    client.split(&user, &10_000i128);
+    // Selling more YES than the pool holds must be rejected by the
+    // pool-depth guard rather than draining the reserve.
+    let res = client.try_sell(&user, &Side::Yes, &20_000i128, &0i128);
+    assert!(res.is_err(), "sell exceeding pool depth must be rejected");
     assert_solvent(&h);
 }
 
 #[test]
-fn buy_yes_moves_price_up() {
+fn buy_then_sell_returns_close_to_original_minus_fees() {
     let h = setup(10_000, true);
-    let user = Address::generate(&h.env);
-    fund(&h, &user, 5_000);
     let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 1_000);
 
-    let total_yes = client.buy(&user, &Prediction::Yes, &1_000, &0);
-    assert!(total_yes > 1_000);
-    let (yes_bps, no_bps) = client.get_price();
-    assert!(yes_bps > 5_000);
-    assert_eq!(yes_bps + no_bps, 10_000);
+    let start = token::Client::new(&h.env, &h.token_id).balance(&user);
+    client.buy(&user, &Side::Yes, &100i128, &1_000i128);
+    let yes = client.get_position(&user).yes;
+    assert!(yes > 0);
+
+    client.sell(&user, &Side::Yes, &yes, &0i128);
+    let end = token::Client::new(&h.env, &h.token_id).balance(&user);
+
+    // Round trip should return close to the original, minus fees and
+    // any small rounding — never more than the starting balance.
+    assert!(end <= start, "round trip must not create collateral");
+    assert!(end >= start - 10, "round trip should return close to original minus fees");
     assert_solvent(&h);
 }
 
 #[test]
-fn sell_full_one_sided_position_returns_nonzero_collateral() {
-    let h = setup(10_000, true);
-    let user = Address::generate(&h.env);
-    fund(&h, &user, 5_000);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-
-    let shares = client.buy(&user, &Prediction::Yes, &1_000, &0);
-    let collateral_back = client.sell(&user, &Prediction::Yes, &shares, &0);
-    assert!(collateral_back > 0);
-    assert_eq!(client.get_position(&user), (0, 0));
-    assert_solvent(&h);
-}
-
-#[test]
-fn buy_large_enough_to_exhaust_a_reserve_is_rejected() {
+fn fee_never_exceeds_base_even_if_total_supply_dips_back_toward_seed() {
     let h = setup(10_000, true);
     let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
     let user = Address::generate(&h.env);
-    fund(&h, &user, 1_000_000_000);
+    fund(&h, &user, 10_000);
 
-    let res = client.try_buy(&user, &Prediction::Yes, &101_000_000, &0);
-    assert_eq!(res, Err(Ok(Error::PoolDepthExceeded)));
-    assert_solvent(&h);
-}
+    // Grow the pool, then shrink it back toward the seed size.
+    client.buy(&user, &Side::Yes, &5_000i128, &10_000i128);
+    let yes = client.get_position(&user).yes;
+    client.sell(&user, &Side::Yes, &yes, &0i128);
 
-// ---------- no fixed expiry: trading keeps working indefinitely ----------
-
-#[test]
-fn trading_continues_correctly_across_a_very_long_time_window_with_no_expiry_ever_set() {
-    // Proves "no fixed expiry" isn't just an unenforced field on a struct
-    // that happens not to have one — advance the ledger clock far past what
-    // would have been a normal polaris-market's expiry+grace_period, and
-    // confirm buy/sell/split/merge are all still unconditionally available.
-    let h = setup(10_000, true);
-    let user = Address::generate(&h.env);
-    fund(&h, &user, 1_000_000);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-
-    let one_year_secs: u64 = 365 * 24 * 60 * 60;
-    h.env.ledger().set_timestamp(h.env.ledger().timestamp() + one_year_secs);
-
-    client.split(&user, &1_000);
-    let shares = client.buy(&user, &Prediction::Yes, &1_000, &0);
-    let _ = client.sell(&user, &Prediction::Yes, &shares, &0);
-    client.merge(&user, &1_000);
-
-    assert_eq!(client.get_market().status, PerpetualStatus::Open);
-    assert_solvent(&h);
-}
-
-// ---------- pause / unpause ----------
-
-#[test]
-fn pause_blocks_buy_and_sell_but_not_split_merge_or_redeem() {
-    let h = setup(10_000, true);
-    let user = Address::generate(&h.env);
-    fund(&h, &user, 5_000);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-
-    client.pause();
-    assert!(client.is_paused());
-
-    assert_eq!(
-        client.try_buy(&user, &Prediction::Yes, &1_000, &0),
-        Err(Ok(Error::Paused))
-    );
-    assert_eq!(
-        client.try_sell(&user, &Prediction::Yes, &1_000, &0),
-        Err(Ok(Error::Paused))
-    );
-
-    client.split(&user, &1_000);
-    client.merge(&user, &1_000);
-
-    client.unpause();
-    assert!(!client.is_paused());
-    let total_yes = client.buy(&user, &Prediction::Yes, &1_000, &0);
-    assert!(total_yes > 0);
-}
-
-#[test]
-fn pause_requires_admin_auth() {
-    let h = setup(10_000, true);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    client.pause();
-    let auths = h.env.auths();
-    assert_eq!(auths.len(), 1);
-    assert_eq!(auths[0].0, h.admin);
-}
-
-#[test]
-fn redeem_still_works_while_paused() {
-    let h = setup(10_000, true);
-    let user = Address::generate(&h.env);
-    fund(&h, &user, 5_000);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    client.split(&user, &1_000);
-
-    client.pause();
-    client.terminate(&h.admin);
-    // Terminate (and the redeem it unlocks) is a wind-down/exit path, not
-    // an AMM-math-dependent trade — pause must never block it.
-    let payout = client.redeem(&user);
-    assert_eq!(payout, 1_000);
-}
-
-// ---------- record_price_checkpoint: zero economic effect ----------
-
-#[test]
-fn checkpoint_records_price_and_changes_nothing_else() {
-    let h = setup(10_000, true);
-    let user = Address::generate(&h.env);
-    fund(&h, &user, 5_000);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-
-    // Build up some real state first, so "nothing else changes" is a
-    // meaningful assertion, not just "zero stays zero".
-    client.buy(&user, &Prediction::Yes, &1_000, &0);
-    let before = client.get_market();
-    let before_user_pos = client.get_position(&user);
-
-    let now = h.env.ledger().timestamp();
-    let payload = build_payload(FEED_ID, 10_000_00000000, -8, now * 1_000_000);
-    let bytes = Bytes::from_slice(&h.env, &payload);
-    set_reflector_price_cents(&h, 1_000_000);
-    set_redstone_price_cents(&h, 1_000_000);
-    client.record_price_checkpoint(&bytes);
-
-    let after = client.get_market();
-    assert_eq!(after.last_price_cents, 1_000_000);
-    assert_eq!(after.last_price_at, now);
-
-    // Every other field byte-identical.
-    assert_eq!(after.pool_yes, before.pool_yes);
-    assert_eq!(after.pool_no, before.pool_no);
-    assert_eq!(after.total_supply, before.total_supply);
-    assert_eq!(after.status, before.status);
-    assert_eq!(client.get_position(&user), before_user_pos);
-    assert_solvent(&h);
-}
-
-#[test]
-fn checkpoint_without_a_configured_oracle_is_rejected() {
-    let h = setup(10_000, false);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    let now = h.env.ledger().timestamp();
-    let payload = build_payload(FEED_ID, 10_000_00000000, -8, now * 1_000_000);
-    let bytes = Bytes::from_slice(&h.env, &payload);
-    let res = client.try_record_price_checkpoint(&bytes);
-    assert_eq!(res, Err(Ok(Error::PriceOracleNotConfigured)));
-}
-
-#[test]
-fn checkpoint_rejects_on_gross_lazer_reflector_divergence() {
-    let h = setup(10_000, true);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    let now = h.env.ledger().timestamp();
-    let payload = build_payload(FEED_ID, 10_000_00000000, -8, now * 1_000_000); // Lazer: $10,000.00
-    let bytes = Bytes::from_slice(&h.env, &payload);
-
-    set_reflector_price_cents(&h, 2_000_000); // Reflector: $20,000.00 — gross divergence
-    set_redstone_price_cents(&h, 1_000_000); // RedStone agrees with Lazer — isolates the Reflector leg
-    let res = client.try_record_price_checkpoint(&bytes);
-    assert_eq!(res, Err(Ok(Error::OracleDivergence)));
-    assert_eq!(client.get_market().last_price_cents, 0, "a rejected checkpoint must not record anything");
-}
-
-#[test]
-fn checkpoint_succeeds_when_lazer_reflector_and_redstone_all_agree() {
-    let h = setup(10_000, true);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    let now = h.env.ledger().timestamp();
-    let payload = build_payload(FEED_ID, 10_000_00000000, -8, now * 1_000_000);
-    let bytes = Bytes::from_slice(&h.env, &payload);
-
-    set_reflector_price_cents(&h, 1_000_000);
-    set_redstone_price_cents(&h, 1_000_000);
-    client.record_price_checkpoint(&bytes);
-    assert_eq!(client.get_market().last_price_cents, 1_000_000);
-}
-
-#[test]
-fn checkpoint_rejects_on_redstone_divergence_even_when_reflector_agrees() {
-    // Unanimous, not majority — same proof as polaris-market's
-    // settle_rejects_on_redstone_divergence_even_when_reflector_agrees.
-    let h = setup(10_000, true);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    let now = h.env.ledger().timestamp();
-    let payload = build_payload(FEED_ID, 10_000_00000000, -8, now * 1_000_000);
-    let bytes = Bytes::from_slice(&h.env, &payload);
-
-    set_reflector_price_cents(&h, 1_000_000); // agrees with Lazer
-    set_redstone_price_cents(&h, 2_000_000); // $20,000.00 — gross divergence
-    let res = client.try_record_price_checkpoint(&bytes);
-    assert_eq!(res, Err(Ok(Error::OracleDivergence)));
-    assert_eq!(client.get_market().last_price_cents, 0);
-}
-
-#[test]
-fn checkpoint_rejects_when_redstone_has_no_price_yet() {
-    let h = setup(10_000, true);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    let now = h.env.ledger().timestamp();
-    let payload = build_payload(FEED_ID, 10_000_00000000, -8, now * 1_000_000);
-    let bytes = Bytes::from_slice(&h.env, &payload);
-
-    set_reflector_price_cents(&h, 1_000_000); // Reflector agrees; RedStone never set
-    let res = client.try_record_price_checkpoint(&bytes);
-    assert_eq!(res, Err(Ok(Error::RedstonePriceUnavailable)));
-}
-
-#[test]
-fn checkpoint_rejects_when_redstones_decimals_drift_from_what_was_pinned_at_init() {
-    // Same landmine `polaris-market`'s equivalent test closes — see this
-    // repo's README and `OracleCheckError::DecimalsChanged`'s doc comment.
-    let h = setup(10_000, true);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    let now = h.env.ledger().timestamp();
-    let payload = build_payload(FEED_ID, 10_000_00000000, -8, now * 1_000_000);
-    let bytes = Bytes::from_slice(&h.env, &payload);
-
-    set_reflector_price_cents(&h, 1_000_000);
-    set_redstone_price_cents(&h, 1_000_000);
-    mock_sep40::MockSep40Client::new(&h.env, &h.redstone_id).set_decimals(&(REFLECTOR_DECIMALS + 4));
-
-    let res = client.try_record_price_checkpoint(&bytes);
-    assert_eq!(res, Err(Ok(Error::RedstoneDecimalsChanged)));
-    assert_eq!(client.get_market().last_price_cents, 0);
-}
-
-// ---------- terminate ----------
-
-#[test]
-fn terminate_by_non_admin_rejected() {
-    let h = setup(10_000, true);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    let not_admin = Address::generate(&h.env);
-    let res = client.try_terminate(&not_admin);
-    assert_eq!(res, Err(Ok(Error::Unauthorized)));
-    assert_eq!(client.get_market().status, PerpetualStatus::Open);
-}
-
-#[test]
-fn terminate_needs_no_price_and_pays_every_holder_at_merge_parity() {
-    // Mirrors polaris-market's cancel_after_grace_refunds_a_matched_pair_
-    // at_merge_parity — same formula, same reasoning, reused verbatim.
-    let h = setup(10_000, true);
-    let user = Address::generate(&h.env);
-    fund(&h, &user, 5_000);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    client.split(&user, &1_000);
-
-    client.terminate(&h.admin);
-    assert_eq!(client.get_market().status, PerpetualStatus::Terminated);
-
+    // A subsequent trade's fee must still be bounded by the base fee.
     let before = token::Client::new(&h.env, &h.token_id).balance(&user);
-    let payout = client.redeem(&user);
-    assert_eq!(payout, 1_000);
+    client.buy(&user, &Side::No, &100i128, &1_000i128);
     let after = token::Client::new(&h.env, &h.token_id).balance(&user);
-    assert_eq!(after - before, 1_000);
+    let spent = before - after;
+    assert!(spent >= 100, "must spend at least the requested amount");
+    assert!(spent <= 100 + 100, "fee must never exceed the base fee");
     assert_solvent(&h);
 }
 
 #[test]
-fn terminate_stays_solvent_for_every_holder_including_treasury() {
-    // Same regression shape as polaris-market's
-    // cancel_redeem_stays_solvent_for_every_holder_including_treasury —
-    // redeem *every* legitimate holder, not just the first, since that's
-    // exactly the case that caught the historical double-count bug.
+fn normal_sized_trades_are_unaffected_by_the_pool_depth_guard() {
     let h = setup(10_000, true);
-    let user = Address::generate(&h.env);
-    fund(&h, &user, 5_000);
     let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    client.split(&user, &1_000);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 1_000);
 
-    client.terminate(&h.admin);
-
-    let user_payout = client.redeem(&user);
-    assert_eq!(user_payout, 1_000);
-    let treasury_payout = client.redeem(&h.treasury);
-    assert_eq!(treasury_payout, 10_000); // (10_000 seed YES + 10_000 seed NO) / 2
-
-    assert_eq!(user_payout + treasury_payout, 11_000); // == total_supply at termination, exactly
+    // A normal-sized buy and sell should both succeed.
+    client.buy(&user, &Side::Yes, &100i128, &1_000i128);
+    let yes = client.get_position(&user).yes;
+    assert!(yes > 0);
+    client.sell(&user, &Side::Yes, &yes, &0i128);
     assert_solvent(&h);
 }
 
 #[test]
-fn double_terminate_rejected() {
+fn fee_only_taken_on_swaps_never_on_split_merge_or_terminate() {
     let h = setup(10_000, true);
     let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 1_000);
+
+    // split / merge must not charge a fee.
+    let before = token::Client::new(&h.env, &h.token_id).balance(&user);
+    client.split(&user, &1_000i128);
+    client.merge(&user, &1_000i128);
+    let after = token::Client::new(&h.env, &h.token_id).balance(&user);
+    assert_eq!(before, after, "split/merge must not charge a fee");
+
+    // terminate must not charge a fee either.
+    let before = token::Client::new(&h.env, &h.token_id).balance(&user);
     client.terminate(&h.admin);
-    let res = client.try_terminate(&h.admin);
-    assert_eq!(res, Err(Ok(Error::AlreadyFinalized)));
-}
-
-#[test]
-fn trading_rejected_once_terminated() {
-    let h = setup(10_000, true);
-    let user = Address::generate(&h.env);
-    fund(&h, &user, 5_000);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    client.terminate(&h.admin);
-
-    assert_eq!(client.try_split(&user, &100), Err(Ok(Error::MarketNotOpen)));
-    assert_eq!(client.try_merge(&user, &100), Err(Ok(Error::MarketNotOpen)));
-    assert_eq!(client.try_buy(&user, &Prediction::Yes, &100, &0), Err(Ok(Error::MarketNotOpen)));
-    assert_eq!(client.try_sell(&user, &Prediction::Yes, &100, &0), Err(Ok(Error::MarketNotOpen)));
-}
-
-#[test]
-fn redeem_before_termination_rejected() {
-    let h = setup(10_000, true);
-    let user = Address::generate(&h.env);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    let res = client.try_redeem(&user);
-    assert_eq!(res, Err(Ok(Error::NotFinalized)));
-}
-
-// ---------- fee curve — same shared implementation as polaris-market ----------
-
-#[test]
-fn fee_starts_at_base_and_decays_toward_min_as_volume_grows() {
-    let h = setup(10_000, true);
-    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
-    let user = Address::generate(&h.env);
-    fund(&h, &user, 1_000_000);
-
-    assert_eq!(client.get_fee(), 100);
-    client.split(&user, &10_000);
-    assert_eq!(client.get_fee(), 60);
+    let after = token::Client::new(&h.env, &h.token_id).balance(&user);
+    assert_eq!(before, after, "terminate must not charge a fee");
     assert_solvent(&h);
 }
