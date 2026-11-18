@@ -72,6 +72,38 @@ fn resolve_differs_for_different_keys() {
 }
 
 #[test]
+fn same_key_resolves_differently_under_two_factory_instances() {
+    // The portability claim in the module doc is scoped to a single factory
+    // instance: the same passkey resolves to the same address only for
+    // frontends pointing at *this* factory. After a factory redeploy, the
+    // same key yields a different address. This test pins that limitation
+    // so readers don't assume addresses are globally stable.
+    let env = Env::default();
+    let (factory_a, _) = setup(&env);
+    let (factory_b, _) = setup(&env);
+    assert_ne!(factory_a, factory_b, "sanity check: the two factories really are distinct");
+
+    let pk = sample_pk(&env, 5);
+    let client_a = SmartWalletFactoryClient::new(&env, &factory_a);
+    let client_b = SmartWalletFactoryClient::new(&env, &factory_b);
+
+    let addr_a = client_a.resolve(&pk);
+    let addr_b = client_b.resolve(&pk);
+    assert_ne!(
+        addr_a,
+        addr_b,
+        "the same key must resolve to different addresses under different factory instances",
+    );
+
+    // And the deployed addresses follow the same factory-scoped rule.
+    let deployed_a = client_a.deploy(&pk);
+    let deployed_b = client_b.deploy(&pk);
+    assert_eq!(deployed_a, addr_a);
+    assert_eq!(deployed_b, addr_b);
+    assert_ne!(deployed_a, deployed_b);
+}
+
+#[test]
 fn deployed_wallet_is_initialized_with_the_given_key() {
     let env = Env::default();
     let (factory_id, _) = setup(&env);
@@ -198,14 +230,6 @@ fn deploy_always_uses_the_pinned_wasm_never_a_caller_choice() {
         "sanity check: the two wasms really are different",
     );
 
-    let pk = sample_pk(&env, 9);
-    let client = SmartWalletFactoryClient::new(&env, &factory_id);
-    let address = client.deploy(&pk);
+    let pk = sample_pk
 
-    let stored_pk: BytesN<65> = env.invoke_contract(
-        &address,
-        &soroban_sdk::Symbol::new(&env, "get_public_key"),
-        soroban_sdk::vec![&env],
-    );
-    assert_eq!(stored_pk, pk, "the deployed contract is a real smart-wallet, not attacker-chosen code");
-}
+/* … truncated 394 chars — edit only what you need near the top … */

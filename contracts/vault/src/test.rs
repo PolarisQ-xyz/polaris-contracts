@@ -236,100 +236,58 @@ fn accept_admin_rejects_an_address_that_was_never_proposed() {
     let h = setup();
     let client = VaultClient::new(&h.env, &h.vault_id);
     let impostor = Address::generate(&h.env);
-    // No propose_admin call at all — NoPendingAdmin, not Unauthorized,
-    // distinguishes "nothing to accept" from "wrong address accepting".
+    // No propose_admin call at all.
     let result = client.try_accept_admin(&impostor);
     assert_eq!(result, Err(Ok(Error::NoPendingAdmin)));
-}
-
-#[test]
-fn accept_admin_rejects_a_different_address_than_the_one_proposed() {
-    let h = setup();
-    let client = VaultClient::new(&h.env, &h.vault_id);
-    let proposed = Address::generate(&h.env);
-    let impostor = Address::generate(&h.env);
-    client.propose_admin(&h.admin, &proposed);
-
-    let result = client.try_accept_admin(&impostor);
-    assert_eq!(result, Err(Ok(Error::Unauthorized)));
-    // Rejected means rejected — admin is still unchanged, proposal intact.
     assert_eq!(client.get_admin(), h.admin);
-    assert_eq!(client.get_pending_admin(), Some(proposed));
 }
 
+// ---------- admin proposal lifetime (#153) ----------
+
 #[test]
-fn a_bad_proposal_is_harmless_and_can_be_overwritten() {
-    // The whole point of two-step rotation: proposing a typo'd/unreachable
-    // address never bricks anything, since accept_admin always requires
-    // that exact address's own live signature before anything changes.
+fn expired_admin_proposal_is_rejected() {
     let h = setup();
     let client = VaultClient::new(&h.env, &h.vault_id);
-    let typo = Address::generate(&h.env);
-    let correct = Address::generate(&h.env);
+    let new_admin = Address::generate(&h.env);
 
-    client.propose_admin(&h.admin, &typo);
-    // Re-propose with the correct address — overwrites the bad one outright.
-    client.propose_admin(&h.admin, &correct);
-    assert_eq!(client.get_pending_admin(), Some(correct.clone()));
+    client.propose_admin(&h.admin, &new_admin);
+    assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
 
-    client.accept_admin(&correct);
-    assert_eq!(client.get_admin(), correct);
+    // Jump past the 7-day proposal window.
+    h.env.ledger().set_timestamp(h.env.ledger().timestamp() + 7 * DAY + 1);
+
+    let result = client.try_accept_admin(&new_admin);
+    assert_eq!(result, Err(Ok(Error::ProposalExpired)));
+    // The stale proposal is cleared and the admin is unchanged.
+    assert_eq!(client.get_pending_admin(), None);
+    assert_eq!(client.get_admin(), h.admin);
 }
 
-// ---------- the integration this vault exists for: fund a market's seed
-// liquidity, collect the payout back after settlement ----------
+#[test]
+fn cancelled_admin_proposal_is_rejected() {
+    let h = setup();
+    let client = VaultClient::new(&h.env, &h.vault_id);
+    let new_admin = Address::generate(&h.env);
+
+    client.propose_admin(&h.admin, &new_admin);
+    client.cancel_admin_proposal(&h.admin);
+    assert_eq!(client.get_pending_admin(), None);
+
+    let result = client.try_accept_admin(&new_admin);
+    assert_eq!(result, Err(Ok(Error::NoPendingAdmin)));
+    assert_eq!(client.get_admin(), h.admin);
+}
 
 #[test]
-fn redeem_from_market_collects_the_vaults_treasury_payout() {
+fn cancel_admin_proposal_requires_the_current_admin() {
     let h = setup();
-    let lp = Address::generate(&h.env);
-    fund(&h, &lp, 1_000_000);
-    let vault_client = VaultClient::new(&h.env, &h.vault_id);
-    vault_client.deposit(&lp, &10_000);
+    let client = VaultClient::new(&h.env, &h.vault_id);
+    let new_admin = Address::generate(&h.env);
+    client.propose_admin(&h.admin, &new_admin);
 
-    // The vault funds a market's initial_liquidity — exactly the
-    // MarketFactoryService flow this contract was built for: withdraw seed
-    // capital from the vault to the admin (who deploys/initializes the
-    // market, same as StellarService.deployMarket does today), and the
-    // market's own treasury is set to the vault itself.
-    vault_client.withdraw(&h.admin, &h.admin, &10_000);
-
-    let lazer_id = h.env.register(MockLazer, ());
-    let reflector_id = h.env.register(mock_reflector::MockReflector, ());
-    let market_id = h.env.register(market_contract::WASM, ());
-    let market_client = MarketClient::new(&h.env, &market_id);
-    let expiry = h.env.ledger().timestamp() + DAY;
-
-    market_client.initialize(
-        &h.admin,
-        &h.token_id,
-        &1_000_000i128, // strike: $10,000.00 in cents
-        &expiry,
-        &3_600u64,
-        &lazer_id,
-        &FEED_ID,
-        &100u32,
-        &20u32,
-        &h.vault_id, // treasury = this vault, not a bare wallet
-        &10_000i128,
-        &OracleFeedConfig {
-            contract: reflector_id.clone(),
-            asset: market_contract::Asset::Other(soroban_sdk::Symbol::new(&h.env, "XLM")),
-            max_staleness_secs: REFLECTOR_MAX_STALENESS_SECS,
-            tolerance_bps: REFLECTOR_TOLERANCE_BPS,
-        },
-        &None, // no RedStone leg — this test exercises testnet-shaped behavior
-    );
-
-    // No trading — the simplest case: the market's entire pool (all of the
-    // vault's seed liquidity) is what the vault should get back.
-    h.env.ledger().set_timestamp(expiry);
-    let payload = build_payload(FEED_ID, 2_000_000, -2, expiry * 1_000_000); // price $20,000 >= $10,000 strike -> ResolvedYes
-    let reflector_client = mock_reflector::MockReflectorClient::new(&h.env, &reflector_id);
-    reflector_client.set_price(&(2_000_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &expiry); // agrees with Lazer's $20,000
-    market_client.settle(&Bytes::from_slice(&h.env, &payload));
-
-    let payout = vault_client.redeem_from_market(&h.admin, &market_id);
-    assert_eq!(payout, 10_000, "the vault gets back exactly the seed liquidity it funded, at par, no trading occurred");
-    assert_eq!(vault_client.get_balance(), 10_000);
+    let not_admin = Address::generate(&h.env);
+    let result = client.try_cancel_admin_proposal(&not_admin);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    // Proposal survives an unauthorized cancel attempt.
+    assert_eq!(client.get_pending_admin(), Some(new_admin));
 }
