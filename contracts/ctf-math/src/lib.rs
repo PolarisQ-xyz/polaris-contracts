@@ -16,7 +16,43 @@
 //! this crate just guarantees the *math* and *verification logic* those
 //! decisions are based on can't independently drift between contracts.
 
+use core::ops::RangeInclusive;
 use soroban_sdk::{contracttype, Env};
+
+/// Persistent-entry TTL target (in ledgers) every Polaris contract extends
+/// its instance/persistent storage to. Declared exactly once here so the
+/// mainnet TTL policy can be tuned in one place instead of seven.
+pub const BUMP_TO: u32 = 535_680;
+
+/// Threshold below which a persistent entry is considered due for a bump.
+pub const BUMP_THRESHOLD: u32 = 500_000;
+
+/// Valid `decimals` range for a SEP-40 oracle feed, derived from the
+/// conversion math in [`reflector_price_to_cents`]:
+///
+/// - Lower bound `2`: the conversion divides by `10^(decimals - 2)`, so
+///   `decimals < 2` would underflow the exponent subtraction.
+/// - Upper bound `30`: `10^30` is the largest power of ten that fits in an
+///   `i128` (`i128::MAX ≈ 1.7 * 10^38`), so `10^(decimals - 2)` stays
+///   representable up to `decimals == 30` and overflows beyond it.
+///
+/// Declared exactly once here so every caller (market, perpetual, oracle
+/// corroboration) shares the same bounds instead of restating them.
+pub const SEP40_DECIMALS_RANGE: RangeInclusive<u32> = 2..=30;
+
+/// Returns `true` when `decimals` is within [`SEP40_DECIMALS_RANGE`].
+pub fn valid_sep40_decimals(decimals: u32) -> bool {
+    SEP40_DECIMALS_RANGE.contains(&decimals)
+}
+
+/// Extends the current contract instance's TTL to `BUMP_TO` when it has
+/// fallen below `BUMP_THRESHOLD`. Shared by every Polaris contract so the
+/// bump window can't drift between them (see #11, #132).
+pub fn touch(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+}
 
 /// amount_out for a constant-product swap of `amount_in` (post-fee) against
 /// reserves (reserve_in, reserve_out). Floors, per Soroban i128 division.
@@ -105,10 +141,16 @@ pub fn to_cents(price: i64, exponent: i16) -> i128 {
 /// Converts Reflector's `PriceData.price` (scaled by `decimals`, USD-based
 /// same as Lazer's `to_cents`) into whole cents, rounding to the nearest
 /// cent rather than truncating — a floor bias would skew every divergence
-/// comparison in one direction. `decimals` is bounds-checked by the caller
-/// before this is called (guards the `10^(decimals - 2)` scaling from
-/// overflow/underflow at the extremes).
+/// comparison in one direction. `decimals` must be within
+/// [`SEP40_DECIMALS_RANGE`] (guards the `10^(decimals - 2)` scaling from
+/// overflow/underflow at the extremes); debug-asserted here so a caller
+/// that forgets to bounds-check trips in tests rather than silently
+/// producing a wrong price.
 pub fn reflector_price_to_cents(price: i128, decimals: u32) -> i128 {
+    debug_assert!(
+        valid_sep40_decimals(decimals),
+        "decimals out of SEP-40 range"
+    );
     let divisor = 10i128.pow(decimals - 2);
     let half = divisor / 2;
     if price >= 0 {
@@ -154,112 +196,6 @@ pub mod sep40 {
     // `lastprice`), where suppressing its own top-level spec entry seemed
     // right. It's since become a genuine field of `OracleFeedConfig`,
     // which *is* part of this contract's own public interface (an
-    // `initialize` parameter) — `export = false` was found, live, to drop
-    // the type's spec entry from the compiled wasm entirely, not just hide
-    // it from "reachable from the public API" discovery, which broke every
-    // spec-driven encoder (the `stellar` CLI's JSON arg parser, and
-    // `@stellar/stellar-sdk`'s `contract.Spec.funcArgsToScVals` used by
-    // `polaris-oracle`) with "Missing Entry Asset" the moment anything
-    // tried to construct an `OracleFeedConfig` from outside Rust source.
-    #[contracttype]
-    #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-    pub enum Asset {
-        Stellar(Address),
-        Other(Symbol),
-    }
+    // `i
 
-    #[contracttype(export = false)]
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    pub struct PriceData {
-        pub price: i128,
-        pub timestamp: u64,
-    }
-}
-
-/// Settle-time corroborating-oracle settings, bundled into one struct
-/// rather than four flat scalars — shared by both contracts' `initialize`,
-/// and by every SEP-40 oracle leg they corroborate against (originally
-/// Reflector-only; RedStone joined as a second, genuinely independent
-/// SEP-40 source using the exact same shape — see `contracts/market`'s
-/// README section for why one struct serves both). Required (not
-/// `Option`) at the type level here; each contract's own `initialize`
-/// decides whether *having* a given leg at all is mandatory.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[contracttype]
-pub struct OracleFeedConfig {
-    pub contract: soroban_sdk::Address,
-    /// This system is XLM-only today (see the vault's fixed-`collateral`
-    /// precedent for this same "one deliberate limitation, stated
-    /// plainly" shape). Different SEP-40 providers key XLM under
-    /// different `Asset` variants — Reflector under
-    /// `Asset::Other(symbol_short!("XLM"))`, RedStone under
-    /// `Asset::Stellar(<native XLM SAC address>)` (confirmed live against
-    /// each provider's real contract) — so the config carries the whole
-    /// variant to construct, not just a bare symbol.
-    pub asset: sep40::Asset,
-    pub max_staleness_secs: u64,
-    pub tolerance_bps: u32,
-}
-
-/// What can go wrong verifying one corroborating oracle leg against a
-/// reference price — deliberately generic, not per-provider: the caller
-/// (each contract's `settle`/`record_price_checkpoint`) already knows
-/// which leg it just checked, so it maps this to its own typed, per-leg
-/// `Error` variant rather than this shared crate needing contract-specific
-/// error numbering.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OracleCheckError {
-    Unavailable,
-    Stale,
-    DecimalsInvalid,
-    /// The oracle's live `decimals()` no longer matches the value pinned
-    /// at `initialize()` time. Not a hardening nicety — RedStone's own
-    /// SEP-40 wrapper contract documents, on-chain, that its `decimals()`
-    /// returns the *maximum precision across every asset it has
-    /// registered*, not this asset's own precision, and can change if a
-    /// higher-precision feed is added later. Silently trusting a fresh
-    /// `decimals()` on every call would let an unrelated RedStone
-    /// admin action silently corrupt this leg's cents conversion; pinning
-    /// it at `initialize()` and failing closed on drift turns that into a
-    /// safe, detected rejection instead.
-    DecimalsChanged,
-    Divergent,
-}
-
-/// Verifies one corroborating SEP-40 oracle leg against `reference_cents`
-/// (the already-verified Lazer price) — the exact check
-/// `contracts/market`'s `settle` has always done for its Reflector leg,
-/// generalized so both contracts can run it once per configured leg
-/// (Reflector, RedStone) instead of duplicating the block per provider
-/// per contract.
-pub fn verify_oracle_corroboration(
-    env: &Env,
-    cfg: &OracleFeedConfig,
-    expected_decimals: u32,
-    now: u64,
-    reference_cents: i128,
-) -> Result<(), OracleCheckError> {
-    let client = sep40::Sep40Client::new(env, &cfg.contract);
-    let price = client.lastprice(&cfg.asset).ok_or(OracleCheckError::Unavailable)?;
-    if price.timestamp + cfg.max_staleness_secs < now {
-        return Err(OracleCheckError::Stale);
-    }
-    let decimals = client.decimals();
-    if !(2..=30).contains(&decimals) {
-        return Err(OracleCheckError::DecimalsInvalid);
-    }
-    if decimals != expected_decimals {
-        return Err(OracleCheckError::DecimalsChanged);
-    }
-    let cents = reflector_price_to_cents(price.price, decimals);
-    let divergence = (reference_cents - cents).abs();
-    let divergence_bps: i128 = if cents == 0 {
-        10_000
-    } else {
-        (divergence * 10_000) / cents.abs()
-    };
-    if divergence_bps > cfg.tolerance_bps as i128 {
-        return Err(OracleCheckError::Divergent);
-    }
-    Ok(())
-}
+/* … truncated 688 chars — edit only what you need near the top … */
