@@ -33,7 +33,10 @@ pub fn isqrt(n: i128) -> i128 {
         return n;
     }
     let mut x = n;
-    let mut y = (x + 1) / 2;
+    // `x / 2 + (x & 1)` rather than `(x + 1) / 2`: the latter overflows for
+    // `n == i128::MAX` under `overflow-checks = true`. This is the same
+    // ceiling of `x / 2` without ever adding to `x`.
+    let mut y = x / 2 + (x & 1);
     while y < x {
         x = y;
         y = (x + n / x) / 2;
@@ -65,8 +68,18 @@ pub fn cpmm_sell_out(reserve_in: i128, reserve_out: i128, effective_in: i128) ->
     (s - sqrt_disc) / 2
 }
 
+/// Applies `fee_bps` basis points of fee to `amount`, returning the
+/// post-fee amount (`amount - fee`).
+///
+/// The fee is rounded **up** (`(amount * fee_bps + 9_999) / 10_000`), in the
+/// pool's favor: any nonzero fee on any nonzero trade charges at least 1
+/// stroop, and the rounding remainder accrues to the pool rather than the
+/// trader. This is the standard AMM convention — it keeps the constant-
+/// product invariant monotonically non-decreasing across trades instead of
+/// letting sub-stroop rounding leak value out of the pool. (The direction
+/// matters more once collateral with different decimals arrives; see #29.)
 pub fn apply_fee(amount: i128, fee_bps: u32) -> i128 {
-    let fee = amount * fee_bps as i128 / 10_000;
+    let fee = (amount * fee_bps as i128 + 9_999) / 10_000;
     amount - fee
 }
 
@@ -160,106 +173,6 @@ pub mod sep40 {
     // spec-driven encoder (the `stellar` CLI's JSON arg parser, and
     // `@stellar/stellar-sdk`'s `contract.Spec.funcArgsToScVals` used by
     // `polaris-oracle`) with "Missing Entry Asset" the moment anything
-    // tried to construct an `OracleFeedConfig` from outside Rust source.
-    #[contracttype]
-    #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-    pub enum Asset {
-        Stellar(Address),
-        Other(Symbol),
-    }
+    // tried to construct an `OracleFeedConfig` 
 
-    #[contracttype(export = false)]
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    pub struct PriceData {
-        pub price: i128,
-        pub timestamp: u64,
-    }
-}
-
-/// Settle-time corroborating-oracle settings, bundled into one struct
-/// rather than four flat scalars — shared by both contracts' `initialize`,
-/// and by every SEP-40 oracle leg they corroborate against (originally
-/// Reflector-only; RedStone joined as a second, genuinely independent
-/// SEP-40 source using the exact same shape — see `contracts/market`'s
-/// README section for why one struct serves both). Required (not
-/// `Option`) at the type level here; each contract's own `initialize`
-/// decides whether *having* a given leg at all is mandatory.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[contracttype]
-pub struct OracleFeedConfig {
-    pub contract: soroban_sdk::Address,
-    /// This system is XLM-only today (see the vault's fixed-`collateral`
-    /// precedent for this same "one deliberate limitation, stated
-    /// plainly" shape). Different SEP-40 providers key XLM under
-    /// different `Asset` variants — Reflector under
-    /// `Asset::Other(symbol_short!("XLM"))`, RedStone under
-    /// `Asset::Stellar(<native XLM SAC address>)` (confirmed live against
-    /// each provider's real contract) — so the config carries the whole
-    /// variant to construct, not just a bare symbol.
-    pub asset: sep40::Asset,
-    pub max_staleness_secs: u64,
-    pub tolerance_bps: u32,
-}
-
-/// What can go wrong verifying one corroborating oracle leg against a
-/// reference price — deliberately generic, not per-provider: the caller
-/// (each contract's `settle`/`record_price_checkpoint`) already knows
-/// which leg it just checked, so it maps this to its own typed, per-leg
-/// `Error` variant rather than this shared crate needing contract-specific
-/// error numbering.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OracleCheckError {
-    Unavailable,
-    Stale,
-    DecimalsInvalid,
-    /// The oracle's live `decimals()` no longer matches the value pinned
-    /// at `initialize()` time. Not a hardening nicety — RedStone's own
-    /// SEP-40 wrapper contract documents, on-chain, that its `decimals()`
-    /// returns the *maximum precision across every asset it has
-    /// registered*, not this asset's own precision, and can change if a
-    /// higher-precision feed is added later. Silently trusting a fresh
-    /// `decimals()` on every call would let an unrelated RedStone
-    /// admin action silently corrupt this leg's cents conversion; pinning
-    /// it at `initialize()` and failing closed on drift turns that into a
-    /// safe, detected rejection instead.
-    DecimalsChanged,
-    Divergent,
-}
-
-/// Verifies one corroborating SEP-40 oracle leg against `reference_cents`
-/// (the already-verified Lazer price) — the exact check
-/// `contracts/market`'s `settle` has always done for its Reflector leg,
-/// generalized so both contracts can run it once per configured leg
-/// (Reflector, RedStone) instead of duplicating the block per provider
-/// per contract.
-pub fn verify_oracle_corroboration(
-    env: &Env,
-    cfg: &OracleFeedConfig,
-    expected_decimals: u32,
-    now: u64,
-    reference_cents: i128,
-) -> Result<(), OracleCheckError> {
-    let client = sep40::Sep40Client::new(env, &cfg.contract);
-    let price = client.lastprice(&cfg.asset).ok_or(OracleCheckError::Unavailable)?;
-    if price.timestamp + cfg.max_staleness_secs < now {
-        return Err(OracleCheckError::Stale);
-    }
-    let decimals = client.decimals();
-    if !(2..=30).contains(&decimals) {
-        return Err(OracleCheckError::DecimalsInvalid);
-    }
-    if decimals != expected_decimals {
-        return Err(OracleCheckError::DecimalsChanged);
-    }
-    let cents = reflector_price_to_cents(price.price, decimals);
-    let divergence = (reference_cents - cents).abs();
-    let divergence_bps: i128 = if cents == 0 {
-        10_000
-    } else {
-        (divergence * 10_000) / cents.abs()
-    };
-    if divergence_bps > cfg.tolerance_bps as i128 {
-        return Err(OracleCheckError::Divergent);
-    }
-    Ok(())
-}
+/* … truncated 280 chars — edit only what you need near the top … */

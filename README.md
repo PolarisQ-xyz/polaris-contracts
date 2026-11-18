@@ -672,3 +672,11 @@ that applies to fund-safety-critical code.
 ## License
 
 [MIT](./LICENSE)
+
+## Handsoff notes
+
+<!-- handsoff-issue-154 -->
+- #154: README says assert_solvent() runs after every test; only about 18 of 48 market tests call it
+
+<!-- handsoff-issue-157 -->
+- #157: contracts/market: no aggregate read; clients need three or more RPC calls (get_market, is_paused, get_redstone_oracle, get_fee, get_price) per market
