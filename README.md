@@ -672,3 +672,17 @@ that applies to fund-safety-critical code.
 ## License
 
 [MIT](./LICENSE)
+
+## Handsoff notes
+
+<!-- handsoff-issue-138 -->
+- #138: ctf-math: staleness boundary (price.timestamp + max_staleness == now) is untested
+
+<!-- handsoff-issue-139 -->
+- #139: contracts/perpetual: no permissionless wind-down backstop; terminate() is admin-only forever
+
+<!-- handsoff-issue-140 -->
+- #140: contracts/market+perpetual: initialize() accepts treasury == the contract's own address, permanently stranding the seed liquidity
+
+<!-- handsoff-issue-141 -->
+- #141: contracts/market+perpetual: pause()/unpause() aren't idempotent; repeated calls emit duplicate events
