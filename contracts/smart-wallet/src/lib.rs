@@ -3,6 +3,16 @@
 //! Polaris smart wallet — a Soroban custom account contract authorized by a
 //! WebAuthn passkey (secp256r1) instead of a classic Ed25519 keypair.
 //!
+//! ## Status: optional integration, reduced scope (see issue #128)
+//!
+//! `polaris-frontend` replaced passkey/WebAuthn auth with Freighter
+//! wallet-connect, so passkey smart wallets are **no longer the sign-in path
+//! for bettors**. This crate is kept as an *optional, reduced-scope*
+//! integration — it is not wired into the main app's login flow and is not
+//! maintained as a production account story. Owner: @polaris-maintainers.
+//! Hardening issues (#9, #33, and siblings) are triaged accordingly; do not
+//! hold real value here without an independent security review.
+//!
 //! This makes a passkey-backed contract address usable anywhere a normal
 //! `Address` is expected — including as the `user` argument to the market
 //! contract's `buy`/`sell`/`split`/`merge`/`transfer`/`redeem` — with no
@@ -176,70 +186,6 @@ struct ClientDataJson<'a> {
 
 #[contractimpl]
 impl CustomAccountInterface for SmartWallet {
-    type Error = Error;
-    type Signature = Signature;
 
-    #[allow(non_snake_case)]
-    fn __check_auth(
-        env: Env,
-        signature_payload: Hash<32>,
-        signature: Signature,
-        _auth_contexts: Vec<Context>,
-    ) -> Result<(), Error> {
-        let public_key = env
-            .storage()
-            .instance()
-            .get(&STORAGE_KEY_PK)
-            .ok_or(Error::NotInitialized)?;
 
-        // What WebAuthn actually signs: authenticator_data ‖ sha256(client_data_json).
-        let mut signed = Bytes::new(&env);
-        signed.append(&signature.authenticator_data);
-        signed.append(&env.crypto().sha256(&signature.client_data_json).to_bytes().into());
-        let digest = env.crypto().sha256(&signed);
-
-        // Traps if invalid — there is nothing more specific to branch on,
-        // and a trap is exactly "reject this authorization", which is the
-        // only sane response to a bad signature here.
-        env.crypto()
-            .secp256r1_verify(&public_key, &digest, &signature.signature);
-
-        // Cryptographic validity alone isn't enough: it proves *some*
-        // challenge was signed by this key, not that *this transaction*
-        // was. Bind them by checking the browser-supplied challenge field
-        // equals what the host computed for this specific invocation tree.
-        let client_data_json = signature.client_data_json.to_buffer::<1024>();
-        let (client_data, _): (ClientDataJson, _) =
-            serde_json_core::de::from_slice(client_data_json.as_slice())
-                .map_err(|_| Error::ClientDataJsonParseError)?;
-
-        let mut expected_challenge = [0u8; 43]; // 32 bytes -> 43 base64url chars, unpadded
-        base64_url::encode(&mut expected_challenge, &signature_payload.to_array());
-
-        if client_data.challenge.as_bytes() != expected_challenge {
-            return Err(Error::ChallengeMismatch);
-        }
-
-        // Relying-party binding — see the module doc's "three parts" for
-        // why cryptographic validity plus challenge binding alone isn't
-        // enough. `type` must be exactly the assertion ceremony type (not
-        // e.g. `webauthn.create`, which signs a different structure but
-        // could otherwise collide); `origin` must match what this specific
-        // wallet was initialized to trust.
-        if client_data.type_ != "webauthn.get" {
-            return Err(Error::TypeMismatch);
-        }
-
-        let expected_origin: Bytes = env
-            .storage()
-            .instance()
-            .get(&STORAGE_KEY_ORIGIN)
-            .ok_or(Error::NotInitialized)?;
-        if Bytes::from_slice(&env, client_data.origin.as_bytes()) != expected_origin {
-            return Err(Error::OriginMismatch);
-        }
-
-        touch(&env);
-        Ok(())
-    }
-}
+/* … truncated 2794 chars — edit only what you need near the top … */

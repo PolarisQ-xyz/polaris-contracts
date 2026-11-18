@@ -672,3 +672,8 @@ that applies to fund-safety-critical code.
 ## License
 
 [MIT](./LICENSE)
+
+## Handsoff notes
+
+<!-- handsoff-issue-127 -->
+- #127: contracts/market module doc still says cancelled redemption pays 1:1 per share on either side
