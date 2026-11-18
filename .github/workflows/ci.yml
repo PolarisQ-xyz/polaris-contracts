@@ -34,6 +34,28 @@ jobs:
             -p polaris-smart-wallet-factory -p polaris-vault -p polaris-perpetual
       - run: cargo test --workspace
 
+  doc:
+    name: cargo doc --workspace --no-deps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Build polaris-market's wasm first
+        # Same `contractimport!` file dependency as the test job above:
+        # rustdoc still expands macros, so the sibling wasm must exist on
+        # disk before `cargo doc` runs.
+        run: cargo build --release --target wasm32v1-none -p polaris-market
+      - name: Build the rest
+        run: |
+          cargo build --release --target wasm32v1-none \
+            -p polaris-mock-lazer -p polaris-mock-redstone -p polaris-smart-wallet \
+            -p polaris-smart-wallet-factory -p polaris-vault -p polaris-perpetual
+      - name: cargo doc (deny warnings)
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
   wasm-build:
     name: release WASM builds
     runs-on: ubuntu-latest

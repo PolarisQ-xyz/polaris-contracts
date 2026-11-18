@@ -106,6 +106,39 @@ approve, and should preserve the solvency invariant
 (`collateral_token.balance(contract) == contract.total_supply`) under
 every ordering of calls.
 
+## Error codes are append-only
+
+Each contract's `Error` enum assigns a numeric value to every variant,
+and those numbers are part of the contract's public ABI — integrators
+(including `polaris-oracle` and `polaris-frontend`) map
+`Error(Contract, #N)` to user-facing messages using them. The same number
+means different things in different contracts, so mappings must be
+per-contract.
+
+**Never renumber an existing error variant.** Once a variant has shipped
+with a numeric value, that value is permanent: do not change it, do not
+remove the variant, and do not reuse its number. New variants are
+appended with the next unused number. This keeps published mappings
+stable and prevents a code from silently changing meaning.
+
+When you add a variant, also add a row to the matching table in
+[ERRORS.md](./ERRORS.md), which is the canonical per-contract reference
+(code, variant, meaning, returning entrypoints, suggested user message).
+
+## Changing storage
+
+Storage keys, storage classes (instance vs persistent), and TTL bump
+policies are documented per contract in [docs/storage.md](./docs/storage.md).
+Before adding or changing any storage key or stored struct:
+
+- [ ] Read [docs/storage.md](./docs/storage.md) and confirm you are not
+  changing the shape of an already-deployed struct (add a new key instead).
+- [ ] Add a row for any new key to the matching table in
+  [docs/storage.md](./docs/storage.md), including its storage class, value
+  type, and TTL bump policy.
+- [ ] If the key is persistent, note it so archival/restore planning picks
+  it up.
+
 ## Peer review
 
 Anyone may review a pull request via comments. A review typically covers

@@ -672,3 +672,8 @@ that applies to fund-safety-critical code.
 ## License
 
 [MIT](./LICENSE)
+
+## Handsoff notes
+
+<!-- handsoff-issue-122 -->
+- #122: README's per-crate test table claims 100 tests; the workspace has 111 #[test] functions
