@@ -88,6 +88,12 @@ length — this isn't punitive, it's the same standard this repo holds its
 own commits to (see the README's bug-hunting log for what "actually
 verified" looks like here).
 
+When you open a PR, GitHub pre-fills the description from
+[`.github/pull_request_template.md`](./.github/pull_request_template.md).
+Fill in the funds-critical checklist there if your change touches
+`contracts/*/src/lib.rs` — see [Funds-critical
+changes](#funds-critical-changes) below for what each item means.
+
 ## Pull request philosophy
 
 Keep patches focused: one PR fixes one bug, adds one feature, or does one
@@ -105,6 +111,36 @@ PR touching this surface should expect thorough review, not a quick
 approve, and should preserve the solvency invariant
 (`collateral_token.balance(contract) == contract.total_supply`) under
 every ordering of calls.
+
+### Funds-critical changes
+
+Any change to `contracts/*/src/lib.rs` (or other code that moves balances,
+share accounting, or signature verification) must satisfy the checklist
+below. These steps are distilled from bugs that actually shipped — the
+Cancelled double count and the factory hijack both came from skipping one
+of them. The same list is in the PR template; tick each box in your PR
+description.
+
+- [ ] **Assert solvency for multi-holder flows.** The invariant
+  `collateral_token.balance(contract) == contract.total_supply` must hold
+  under every ordering of calls, and a test must exercise the multi-holder
+  path (not just a single depositor).
+- [ ] **Don't change stored struct shapes.** No fields added, removed, or
+  reordered in `#[contracttype]` structs that are already persisted
+  on-chain. If a shape change is unavoidable, document the migration and
+  test it against pre-existing state.
+- [ ] **Rebuild and update the WASM hash table.** Run
+  `cargo build --release --target wasm32v1-none` and update the recorded
+  WASM hash table so it matches the new artifact.
+- [ ] **Copy the WASM into `polaris-oracle/wasm/`.** The rebuilt artifact
+  must be copied to the oracle-side `wasm/` directory so both sides stay in
+  sync.
+- [ ] **Coordinate oracle-side argument changes.** If the arguments the
+  oracle passes (or expects) change, update the oracle side in the same PR
+  or a linked one — don't leave the two halves disagreeing.
+- [ ] **Add a regression test named after the bug.** The test must fail
+  without the fix and pass with it, and be named for the bug it guards
+  against (e.g. `test_cancelled_double_count`).
 
 ## Peer review
 

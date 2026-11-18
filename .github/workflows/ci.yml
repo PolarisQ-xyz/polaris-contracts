@@ -34,6 +34,44 @@ jobs:
             -p polaris-smart-wallet-factory -p polaris-vault -p polaris-perpetual
       - run: cargo test --workspace
 
+  coverage:
+    name: cargo llvm-cov --workspace --lcov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Build polaris-market's wasm first
+        # Same `contractimport!` file dependency as the `test` job above —
+        # the coverage run compiles and runs the same native test binaries,
+        # so it needs the same pre-built wasm.
+        run: cargo build --release --target wasm32v1-none -p polaris-market
+      - name: Build the rest
+        run: |
+          cargo build --release --target wasm32v1-none \
+            -p polaris-mock-lazer -p polaris-mock-redstone -p polaris-smart-wallet \
+            -p polaris-smart-wallet-factory -p polaris-vault -p polaris-perpetual
+      - name: Generate LCOV coverage report
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Print per-crate summary
+        # Surfaces line coverage for the funds-critical crates in the job log
+        # so a regression is visible in review without downloading the
+        # artifact. Baseline numbers live in README.md.
+        run: |
+          cargo llvm-cov report --summary-only \
+            --package polaris-market --package polaris-perpetual
+      - name: Upload LCOV report
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov-report
+          path: lcov.info
+          if-no-files-found: error
+
   wasm-build:
     name: release WASM builds
     runs-on: ubuntu-latest
