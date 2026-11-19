@@ -105,13 +105,15 @@ fn fund(h: &Harness, who: &Address, amount: i128) {
 fn set_reflector_price_cents(h: &Harness, cents: i128) {
     let client = mock_sep40::MockSep40Client::new(&h.env, &h.reflector_id);
     let price = cents * 10i128.pow(REFLECTOR_DECIMALS - 2);
-    client.set_price(&price, &h.env.ledger().timestamp());
+    let asset = default_price_oracle(&h.env, &h.lazer_id, &h.reflector_id, &h.redstone_id).reflector.asset;
+    client.set_price(&asset, &price, &h.env.ledger().timestamp());
 }
 
 fn set_redstone_price_cents(h: &Harness, cents: i128) {
     let client = mock_sep40::MockSep40Client::new(&h.env, &h.redstone_id);
     let price = cents * 10i128.pow(REFLECTOR_DECIMALS - 2);
-    client.set_price(&price, &h.env.ledger().timestamp());
+    let asset = default_price_oracle(&h.env, &h.lazer_id, &h.reflector_id, &h.redstone_id).redstone.asset;
+    client.set_price(&asset, &price, &h.env.ledger().timestamp());
 }
 
 mod mock_lazer {
@@ -135,9 +137,9 @@ mod mock_lazer {
 /// rationale.
 mod mock_sep40 {
     use polaris_ctf_math::sep40::{Asset, PriceData};
-    use soroban_sdk::{contract, contractimpl, symbol_short, Env};
+    use soroban_sdk::{contract, contractimpl, symbol_short, Env, Map};
 
-    const PRICE_KEY: soroban_sdk::Symbol = symbol_short!("px");
+    const PRICES_KEY: soroban_sdk::Symbol = symbol_short!("px");
     const DECIMALS_KEY: soroban_sdk::Symbol = symbol_short!("dec");
     const RESOLUTION_KEY: soroban_sdk::Symbol = symbol_short!("res");
 
@@ -146,12 +148,20 @@ mod mock_sep40 {
 
     #[contractimpl]
     impl MockSep40 {
-        pub fn set_price(env: Env, price: i128, timestamp: u64) {
-            env.storage().instance().set(&PRICE_KEY, &(price, timestamp));
+        /// Keyed by `asset`, like the real SEP-40 providers — a price set for
+        /// one asset is invisible to `lastprice` for any other, so a
+        /// mis-configured `OracleFeedConfig.asset` fails a test instead of
+        /// silently passing.
+        pub fn set_price(env: Env, asset: Asset, price: i128, timestamp: u64) {
+            let mut prices = Self::prices(&env);
+            prices.set(asset, (price, timestamp));
+            env.storage().instance().set(&PRICES_KEY, &prices);
         }
 
+        /// Clears every asset's price — the mock is a single shared instance,
+        /// so "no price yet" is a whole-contract state, not a per-asset one.
         pub fn set_none(env: Env) {
-            env.storage().instance().remove(&PRICE_KEY);
+            env.storage().instance().remove(&PRICES_KEY);
         }
 
         pub fn set_decimals(env: Env, decimals: u32) {
@@ -162,8 +172,8 @@ mod mock_sep40 {
             env.storage().instance().set(&RESOLUTION_KEY, &resolution);
         }
 
-        pub fn lastprice(env: Env, _asset: Asset) -> Option<PriceData> {
-            env.storage().instance().get::<_, (i128, u64)>(&PRICE_KEY).map(|(price, timestamp)| PriceData { price, timestamp })
+        pub fn lastprice(env: Env, asset: Asset) -> Option<PriceData> {
+            Self::prices(&env).get(asset).map(|(price, timestamp)| PriceData { price, timestamp })
         }
 
         pub fn decimals(env: Env) -> u32 {
@@ -172,6 +182,10 @@ mod mock_sep40 {
 
         pub fn resolution(env: Env) -> u32 {
             env.storage().instance().get(&RESOLUTION_KEY).unwrap_or(super::REFLECTOR_RESOLUTION_SECS)
+        }
+
+        fn prices(env: &Env) -> Map<Asset, (i128, u64)> {
+            env.storage().instance().get(&PRICES_KEY).unwrap_or_else(|| Map::new(env))
         }
     }
 }

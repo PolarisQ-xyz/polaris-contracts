@@ -513,7 +513,10 @@ redundancy.
   wired into `polaris-oracle`'s perpetual deployment alongside the real
   Reflector testnet oracle — this makes `record_price_checkpoint`
   genuinely exercisable end-to-end on testnet, not just unit-tested
-  against a mock in isolation.
+  against a mock in isolation. Its prices are keyed by `Asset`
+  (`set_price(asset, price, ts)`), so a config pointing at the wrong asset
+  gets `None` — and therefore a `*PriceUnavailable` error — rather than
+  another asset's price.
 
 ## The perpetual contract
 

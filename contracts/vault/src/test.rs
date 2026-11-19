@@ -26,7 +26,7 @@ const REFLECTOR_TOLERANCE_BPS: u32 = 150;
 /// actually constructs `Asset`/`PriceData` when it calls `lastprice`, so
 /// this only needs matching XDR shape (variant/field order), not identity.
 mod mock_reflector {
-    use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
+    use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Map, Symbol};
 
     #[contracttype(export = false)]
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,22 +42,29 @@ mod mock_reflector {
         pub timestamp: u64,
     }
 
-    const PRICE_KEY: Symbol = symbol_short!("px");
+    const PRICES_KEY: Symbol = symbol_short!("px");
 
     #[contract]
     pub struct MockReflector;
 
     #[contractimpl]
     impl MockReflector {
-        pub fn set_price(env: Env, price: i128, timestamp: u64) {
-            env.storage().instance().set(&PRICE_KEY, &(price, timestamp));
+        /// Keyed by `asset`, like the real SEP-40 providers — a price set for
+        /// one asset is invisible to `lastprice` for any other, so a
+        /// mis-configured `OracleFeedConfig.asset` fails a test instead of
+        /// silently passing.
+        pub fn set_price(env: Env, asset: Asset, price: i128, timestamp: u64) {
+            let mut prices = Self::prices(&env);
+            prices.set(asset, (price, timestamp));
+            env.storage().instance().set(&PRICES_KEY, &prices);
         }
 
-        pub fn lastprice(env: Env, _asset: Asset) -> Option<PriceData> {
-            env.storage()
-                .instance()
-                .get::<_, (i128, u64)>(&PRICE_KEY)
-                .map(|(price, timestamp)| PriceData { price, timestamp })
+        pub fn lastprice(env: Env, asset: Asset) -> Option<PriceData> {
+            Self::prices(&env).get(asset).map(|(price, timestamp)| PriceData { price, timestamp })
+        }
+
+        fn prices(env: &Env) -> Map<Asset, (i128, u64)> {
+            env.storage().instance().get(&PRICES_KEY).unwrap_or_else(|| Map::new(env))
         }
 
         pub fn decimals(_env: Env) -> u32 {
@@ -326,7 +333,11 @@ fn redeem_from_market_collects_the_vaults_treasury_payout() {
     h.env.ledger().set_timestamp(expiry);
     let payload = build_payload(FEED_ID, 2_000_000, -2, expiry * 1_000_000); // price $20,000 >= $10,000 strike -> ResolvedYes
     let reflector_client = mock_reflector::MockReflectorClient::new(&h.env, &reflector_id);
-    reflector_client.set_price(&(2_000_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &expiry); // agrees with Lazer's $20,000
+    reflector_client.set_price(
+        &market_contract::Asset::Other(soroban_sdk::Symbol::new(&h.env, "XLM")),
+        &(2_000_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)),
+        &expiry,
+    ); // agrees with Lazer's $20,000
     market_client.settle(&Bytes::from_slice(&h.env, &payload));
 
     let payout = vault_client.redeem_from_market(&h.admin, &market_id);

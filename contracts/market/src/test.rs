@@ -3,7 +3,7 @@ extern crate std;
 
 use super::*;
 use soroban_sdk::testutils::{Address as _, Ledger};
-use soroban_sdk::{token, Address, Env, Symbol};
+use soroban_sdk::{symbol_short, token, Address, Env, Symbol};
 
 /// Wire-format payload matching pyth-lazer-stellar-sdk's parser: magic(4) +
 /// timestamp(8, LE µs) + channel(1) + num_feeds(1) + [feed_id(4) +
@@ -61,8 +61,8 @@ fn default_reflector_config(env: &Env, reflector_id: &Address) -> OracleFeedConf
 /// RedStone's real Stellar SEP-40 wrapper keys XLM under
 /// `Asset::Stellar(<native XLM SAC address>)`, not `Asset::Other("XLM")`
 /// like Reflector — confirmed live against the real mainnet contract, see
-/// this repo's README. The mock doesn't actually gate on the asset value,
-/// but a fresh address stands in for "the SAC" for realism.
+/// this repo's README. The mock keys prices by asset, so this must match
+/// exactly what `set_redstone_price_cents` prices.
 fn default_redstone_config(env: &Env, redstone_id: &Address) -> OracleFeedConfig {
     OracleFeedConfig {
         contract: redstone_id.clone(),
@@ -186,7 +186,8 @@ fn fund(h: &Harness, who: &Address, amount: i128) {
 fn set_reflector_price_cents(h: &Harness, cents: i128) {
     let client = mock_sep40::MockSep40Client::new(&h.env, &h.reflector_id);
     let price = cents * 10i128.pow(REFLECTOR_DECIMALS - 2);
-    client.set_price(&price, &h.env.ledger().timestamp());
+    let asset = default_reflector_config(&h.env, &h.reflector_id).asset;
+    client.set_price(&asset, &price, &h.env.ledger().timestamp());
 }
 
 /// Same conversion as `set_reflector_price_cents`, for the RedStone leg —
@@ -195,7 +196,8 @@ fn set_reflector_price_cents(h: &Harness, cents: i128) {
 fn set_redstone_price_cents(env: &Env, redstone_id: &Address, cents: i128) {
     let client = mock_sep40::MockSep40Client::new(env, redstone_id);
     let price = cents * 10i128.pow(REFLECTOR_DECIMALS - 2);
-    client.set_price(&price, &env.ledger().timestamp());
+    let asset = default_redstone_config(env, redstone_id).asset;
+    client.set_price(&asset, &price, &env.ledger().timestamp());
 }
 
 mod mock_lazer {
@@ -225,9 +227,9 @@ mod mock_lazer {
 /// the XDR-shape-drift trap that redeclaring would open.
 mod mock_sep40 {
     use polaris_ctf_math::sep40::{Asset, PriceData};
-    use soroban_sdk::{contract, contractimpl, symbol_short, Env};
+    use soroban_sdk::{contract, contractimpl, symbol_short, Env, Map};
 
-    const PRICE_KEY: soroban_sdk::Symbol = symbol_short!("px");
+    const PRICES_KEY: soroban_sdk::Symbol = symbol_short!("px");
     const DECIMALS_KEY: soroban_sdk::Symbol = symbol_short!("dec");
     const RESOLUTION_KEY: soroban_sdk::Symbol = symbol_short!("res");
 
@@ -236,12 +238,20 @@ mod mock_sep40 {
 
     #[contractimpl]
     impl MockSep40 {
-        pub fn set_price(env: Env, price: i128, timestamp: u64) {
-            env.storage().instance().set(&PRICE_KEY, &(price, timestamp));
+        /// Keyed by `asset`, like the real SEP-40 providers — a price set for
+        /// one asset is invisible to `lastprice` for any other, so a
+        /// mis-configured `OracleFeedConfig.asset` fails a test instead of
+        /// silently passing.
+        pub fn set_price(env: Env, asset: Asset, price: i128, timestamp: u64) {
+            let mut prices = Self::prices(&env);
+            prices.set(asset, (price, timestamp));
+            env.storage().instance().set(&PRICES_KEY, &prices);
         }
 
+        /// Clears every asset's price — the mock is a single shared instance,
+        /// so "no price yet" is a whole-contract state, not a per-asset one.
         pub fn set_none(env: Env) {
-            env.storage().instance().remove(&PRICE_KEY);
+            env.storage().instance().remove(&PRICES_KEY);
         }
 
         /// Defaults to `REFLECTOR_DECIMALS` until overridden — lets a test
@@ -257,11 +267,8 @@ mod mock_sep40 {
             env.storage().instance().set(&RESOLUTION_KEY, &resolution);
         }
 
-        pub fn lastprice(env: Env, _asset: Asset) -> Option<PriceData> {
-            env.storage()
-                .instance()
-                .get::<_, (i128, u64)>(&PRICE_KEY)
-                .map(|(price, timestamp)| PriceData { price, timestamp })
+        pub fn lastprice(env: Env, asset: Asset) -> Option<PriceData> {
+            Self::prices(&env).get(asset).map(|(price, timestamp)| PriceData { price, timestamp })
         }
 
         pub fn decimals(env: Env) -> u32 {
@@ -270,6 +277,10 @@ mod mock_sep40 {
 
         pub fn resolution(env: Env) -> u32 {
             env.storage().instance().get(&RESOLUTION_KEY).unwrap_or(super::REFLECTOR_RESOLUTION_SECS)
+        }
+
+        fn prices(env: &Env) -> Map<Asset, (i128, u64)> {
+            env.storage().instance().get(&PRICES_KEY).unwrap_or_else(|| Map::new(env))
         }
     }
 }
@@ -466,6 +477,116 @@ fn pause_requires_admin_auth() {
     let auths = h.env.auths();
     assert_eq!(auths.len(), 1);
     assert_eq!(auths[0].0, h.admin);
+}
+
+/// Issue #107: `mock_all_auths()` auto-approves every address, so a
+/// `require_auth()` on the *wrong* address (e.g. `treasury` instead of
+/// `user`) would still pass every other test in this file. These assert the
+/// exact `(address, invocation)` pair recorded by `env.auths()` for each
+/// user-gated entrypoint, so deleting or mis-targeting any single
+/// `require_auth` line breaks a test.
+#[test]
+fn split_requires_exactly_the_users_auth() {
+    let h = setup(1_000_000, 10_000);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+
+    client.split(&user, &1_000);
+    let auths = h.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, user);
+    assert_eq!(auths[0].1.fn_name, symbol_short!("split"));
+}
+
+#[test]
+fn merge_requires_exactly_the_users_auth() {
+    let h = setup(1_000_000, 10_000);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    client.split(&user, &1_000);
+
+    client.merge(&user, &1_000);
+    let auths = h.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, user);
+    assert_eq!(auths[0].1.fn_name, symbol_short!("merge"));
+}
+
+#[test]
+fn buy_requires_exactly_the_users_auth() {
+    let h = setup(1_000_000, 10_000);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+
+    client.buy(&user, &Prediction::Yes, &1_000, &0);
+    let auths = h.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, user);
+    assert_eq!(auths[0].1.fn_name, symbol_short!("buy"));
+}
+
+#[test]
+fn sell_requires_exactly_the_users_auth() {
+    let h = setup(1_000_000, 10_000);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    let shares = client.buy(&user, &Prediction::Yes, &1_000, &0);
+
+    client.sell(&user, &Prediction::Yes, &shares, &0);
+    let auths = h.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, user);
+    assert_eq!(auths[0].1.fn_name, symbol_short!("sell"));
+}
+
+#[test]
+fn transfer_requires_exactly_the_senders_auth() {
+    let h = setup(1_000_000, 10_000);
+    let from = Address::generate(&h.env);
+    let to = Address::generate(&h.env);
+    fund(&h, &from, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    client.split(&from, &1_000);
+
+    client.transfer(&from, &to, &Prediction::Yes, &400);
+    let auths = h.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, from);
+    assert_eq!(auths[0].1.fn_name, symbol_short!("transfer"));
+}
+
+#[test]
+fn redeem_requires_exactly_the_users_auth() {
+    let h = setup(1_000_000, 10_000);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    client.split(&user, &1_000);
+
+    h.env.ledger().set_timestamp(h.expiry + h.grace + 1);
+    client.cancel();
+    client.redeem(&user);
+    let auths = h.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, user);
+    assert_eq!(auths[0].1.fn_name, symbol_short!("redeem"));
+}
+
+#[test]
+fn unpause_requires_exactly_the_admins_auth() {
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    client.pause();
+
+    client.unpause();
+    let auths = h.env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, h.admin);
+    assert_eq!(auths[0].1.fn_name, symbol_short!("unpause"));
 }
 
 #[test]
@@ -692,6 +813,168 @@ fn double_settle_rejected() {
     client.settle(&bytes);
     let res = client.try_settle(&bytes);
     assert_eq!(res, Err(Ok(Error::AlreadyFinalized)));
+}
+
+// ---------- emitted events ----------
+//
+// Every event-emitting entrypoint gets one test asserting the exact
+// `(topics, data)` pair it publishes, so an accidental topic rename or
+// payload-shape change fails here instead of silently breaking an indexer.
+// Downstream consumers per event:
+//   init    -> deployment tooling / market directory indexers (strike, expiry)
+//   paused  -> trading UIs + keeper bots that stop quoting on a halt
+//   unpaused-> same, resuming quotes
+//   split   -> position indexers (per-user YES/NO balances)
+//   merge   -> position indexers
+//   buy     -> price/volume indexers, portfolio trackers, AMM analytics
+//   sell    -> price/volume indexers, portfolio trackers, AMM analytics
+//   xfer    -> position indexers / transfer feeds
+//   settle  -> settlement watchers, redemption UIs, oracle-consumed feeds
+//   cancel  -> settlement watchers, redemption UIs
+//   redeem  -> payout ledgers, treasury accounting
+
+/// Asserts the last emitted event is exactly `(topics, data)`, comparing
+/// the XDR `ScVal` forms so the assertion is on the wire shape an indexer
+/// actually sees, not on Rust-side equality of the source values.
+fn assert_last_event<T, D>(h: &Harness, topics: T, data: D)
+where
+    T: IntoVal<Env, soroban_sdk::Vec<soroban_sdk::Val>>,
+    D: IntoVal<Env, soroban_sdk::Val>,
+{
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::TryFromVal;
+    let all = h.env.events().all();
+    let (_, last_topics, last_data) = all.last().expect("no events emitted");
+    let want_topics = soroban_sdk::xdr::ScVal::try_from_val(&h.env, &topics.into_val(&h.env)).unwrap();
+    let want_data = soroban_sdk::xdr::ScVal::try_from_val(&h.env, &data.into_val(&h.env)).unwrap();
+    assert_eq!(
+        soroban_sdk::xdr::ScVal::try_from_val(&h.env, &last_topics).unwrap(),
+        want_topics,
+        "event topics mismatch"
+    );
+    assert_eq!(
+        soroban_sdk::xdr::ScVal::try_from_val(&h.env, &last_data).unwrap(),
+        want_data,
+        "event data mismatch"
+    );
+}
+
+#[test]
+fn init_emits_strike_and_expiry() {
+    let h = setup(1_000_000, 10_000);
+    assert_last_event(&h, (symbol_short!("init"),), (1_000_000i128, h.expiry));
+}
+
+#[test]
+fn pause_and_unpause_emit_events() {
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    client.pause();
+    assert_last_event(&h, (symbol_short!("paused"),), ());
+    client.unpause();
+    assert_last_event(&h, (symbol_short!("unpaused"),), ());
+}
+
+#[test]
+fn split_and_merge_emit_events() {
+    let h = setup(1_000_000, 10_000);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+
+    client.split(&user, &2_000);
+    assert_last_event(&h, (symbol_short!("split"), user.clone()), 2_000i128);
+
+    client.merge(&user, &2_000);
+    assert_last_event(&h, (symbol_short!("merge"), user.clone()), 2_000i128);
+}
+
+#[test]
+fn buy_emits_collateral_and_shares_out() {
+    let h = setup(1_000_000, 10_000);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+
+    let total_yes = client.buy(&user, &Prediction::Yes, &1_000, &0);
+    assert_last_event(
+        &h,
+        (symbol_short!("buy"), user.clone(), Prediction::Yes),
+        (1_000i128, total_yes - 1_000),
+    );
+}
+
+#[test]
+fn sell_emits_shares_in_and_collateral_out() {
+    let h = setup(1_000_000, 10_000);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+
+    let shares = client.buy(&user, &Prediction::Yes, &1_000, &0);
+    let collateral_back = client.sell(&user, &Prediction::Yes, &shares, &0);
+    assert_last_event(
+        &h,
+        (symbol_short!("sell"), user.clone(), Prediction::Yes),
+        (shares, collateral_back),
+    );
+}
+
+#[test]
+fn transfer_emits_xfer_event() {
+    let h = setup(1_000_000, 10_000);
+    let alice = Address::generate(&h.env);
+    let bob = Address::generate(&h.env);
+    fund(&h, &alice, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+
+    client.split(&alice, &1_000);
+    client.transfer(&alice, &bob, &Prediction::Yes, &400);
+    assert_last_event(
+        &h,
+        (symbol_short!("xfer"), alice.clone(), bob.clone(), Prediction::Yes),
+        400i128,
+    );
+}
+
+#[test]
+fn settle_emits_status_and_final_price() {
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+    let payload = build_payload(FEED_ID, 10_000_00000000, -8, h.expiry * 1_000_000);
+    let bytes = Bytes::from_slice(&h.env, &payload);
+    set_reflector_price_cents(&h, 1_000_000);
+    client.settle(&bytes);
+
+    assert_last_event(
+        &h,
+        (symbol_short!("settle"),),
+        (MarketStatus::ResolvedYes, 1_000_000i128),
+    );
+}
+
+#[test]
+fn cancel_emits_event() {
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry + h.grace + 1);
+    client.cancel();
+    assert_last_event(&h, (symbol_short!("cancel"),), ());
+}
+
+#[test]
+fn redeem_emits_payout() {
+    let h = setup(1_000_000, 10_000);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    client.split(&user, &1_000);
+
+    h.env.ledger().set_timestamp(h.expiry + h.grace + 1);
+    client.cancel();
+    let payout = client.redeem(&user);
+    assert_last_event(&h, (symbol_short!("redeem"), user.clone()), payout);
 }
 
 // ---------- on-chain Reflector cross-check ----------

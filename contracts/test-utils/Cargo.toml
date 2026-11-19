@@ -1,0 +1,17 @@
+[package]
+name = "polaris-test-utils"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# rlib only: this crate is dev-only scaffolding and must never contribute
+# symbols to any contract's wasm (see polaris-ctf-math/Cargo.toml).
+crate-type = ["rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+# The mock oracle contracts are reused as-is rather than re-declared here, so
+# there is exactly one definition of each mock in the workspace.
+polaris-mock-lazer = { path = "../mock-lazer" }
+polaris-mock-redstone = { path = "../mock-redstone" }
