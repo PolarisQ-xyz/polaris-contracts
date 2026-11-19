@@ -6,14 +6,26 @@ on:
   pull_request:
 
 jobs:
-  test:
-    name: cargo test --workspace
+  fmt:
+    name: cargo fmt --all -- --check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32v1-none
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  test:
+    name: cargo test --workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Reads the pinned channel/components/targets from rust-toolchain.toml,
+      # so CI and local builds use the same Rust version.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
       - uses: Swatinem/rust-cache@v2
       - name: Build polaris-market's wasm first
         # contracts/vault AND contracts/smart-wallet-factory both read
@@ -39,9 +51,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
-          targets: wasm32v1-none
+          toolchain: 1.91.0
       - uses: Swatinem/rust-cache@v2
       - name: Build polaris-market first
         # polaris-vault's `contractimport!` reads polaris-market's compiled
@@ -58,3 +70,69 @@ jobs:
           cargo build --release --target wasm32v1-none \
             -p polaris-mock-lazer -p polaris-mock-redstone -p polaris-smart-wallet \
             -p polaris-smart-wallet-factory -p polaris-vault -p polaris-perpetual
+      - name: Verify README hash table is current
+        # The README's "Current build" table is what polaris-oracle pins
+        # MARKET_WASM_HASH/PERPETUAL_WASM_HASH against, so a stale table means
+        # the backend is told to trust a wasm this repo no longer builds.
+        # Fails the job (and so the PR) when any size or SHA-256 differs.
+        run: |
+          set -euo pipefail
+          out=target/wasm32v1-none/release
+          stale=0
+          for wasm in "$out"/*.wasm; do
+            name=$(basename "$wasm")
+            size=$(stat -c %s "$wasm")
+            hash=$(sha256sum "$wasm" | cut -d' ' -f1)
+            row=$(grep -F "\`$name\`" README.md || true)
+            if [ -z "$row" ]; then
+              echo "::error file=README.md::no hash-table row for $name"
+              stale=1
+              continue
+            fi
+            if ! grep -qF "$hash" <<<"$row"; then
+              echo "::error file=README.md::$name SHA-256 is $hash, README says: $row"
+              stale=1
+            fi
+            if ! grep -qF "$(printf '%s bytes' "$size")" <<<"$row"; then
+              echo "::error file=README.md::$name is $size bytes, README says: $row"
+              stale=1
+            fi
+          done
+          if [ "$stale" -ne 0 ]; then
+            echo "README hash table is stale — regenerate it (see 'Building & testing')."
+            exit 1
+          fi
+          echo "README hash table matches the release WASMs."
+      - name: Write artifact manifest
+        # Per-main-commit manifest, so polaris-oracle can fetch a wasm and
+        # check it against the hash it pins instead of trusting a mutable tag.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          out=target/wasm32v1-none/release
+          {
+            echo "commit: ${{ github.sha }}"
+            echo "toolchain: $(grep channel rust-toolchain.toml)"
+            echo
+            echo "| Contract | Size | SHA-256 |"
+            echo "|---|---|---|"
+            for wasm in "$out"/*.wasm; do
+              echo "| \`$(basename "$wasm")\` | $(stat -c %s "$wasm") bytes | \`$(sha256sum "$wasm" | cut -d' ' -f1)\` |"
+            done
+          } > "$out/MANIFEST.md"
+      - name: Publish release WASMs
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: polaris-wasm-${{ github.sha }}
+          path: target/wasm32v1-none/release/*.wasm
+          if-no-files-found: error
+          retention-days: 90
+      - name: Publish artifact manifest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: polaris-wasm-manifest-${{ github.sha }}
+          path: target/wasm32v1-none/release/MANIFEST.md
+          if-no-files-found: error
+          retention-days: 90

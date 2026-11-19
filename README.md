@@ -599,11 +599,16 @@ live.
 
 ## Building & testing
 
+The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml)
+(Rust 1.91.0, with the `wasm32v1-none` target and `rustfmt`/`clippy`).
+`rustup` picks it up automatically, and CI reads the same file, so local and
+CI builds use the same compiler — no manual `rustup target add` needed.
+
 ```sh
 # unit tests (native target; 100 across the whole workspace)
 cargo test --workspace
 
-# release WASM (requires `rustup target add wasm32v1-none`)
+# release WASM (the wasm32v1-none target comes from rust-toolchain.toml)
 # polaris-market first, on its own — polaris-vault's contractimport! reads
 # its compiled wasm as a file at build time, a dependency Cargo's own
 # graph doesn't know about (see "The capital-efficiency vault" above).
