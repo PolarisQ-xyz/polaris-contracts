@@ -816,6 +816,48 @@ fn settle_via_reflector_no_wins_below_strike() {
     assert_solvent(&h);
 }
 
+/// The `settle` event's third data field is the path discriminator, so an
+/// indexer can tell the two settlement paths apart from the event alone.
+#[test]
+fn settle_event_records_settlement_source() {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::TryFromVal;
+
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+
+    // Lazer path.
+    let payload = build_payload(FEED_ID, 10_000_00000000, -8, h.expiry * 1_000_000);
+    let bytes = Bytes::from_slice(&h.env, &payload);
+    set_reflector_price_cents(&h, 1_000_000);
+    client.settle(&bytes);
+
+    let events = h.env.events().all();
+    let (_, _, data) = events.last().unwrap();
+    let (status, cents, source): (MarketStatus, i128, SettlementSource) =
+        <(MarketStatus, i128, SettlementSource)>::try_from_val(&h.env, &data).unwrap();
+    assert_eq!(status, MarketStatus::ResolvedYes);
+    assert_eq!(cents, 1_000_000);
+    assert_eq!(source, SettlementSource::Lazer);
+
+    // Reflector path, on a fresh market.
+    let h2 = setup(1_000_000, 10_000);
+    let client2 = PolarisMarketClient::new(&h2.env, &h2.market_id);
+    h2.env.ledger().set_timestamp(h2.expiry);
+    set_reflector_price_cents(&h2, 1_000_000);
+    client2.settle_via_reflector();
+
+    let events2 = h2.env.events().all();
+    let (_, _, data2) = events2.last().unwrap();
+    let (status2, cents2, source2): (MarketStatus, i128, SettlementSource) =
+        <(MarketStatus, i128, SettlementSource)>::try_from_val(&h2.env, &data2).unwrap();
+    assert_eq!(status2, MarketStatus::ResolvedYes);
+    assert_eq!(cents2, 1_000_000);
+    assert_eq!(source2, SettlementSource::Reflector);
+    assert_ne!(source, source2);
+}
+
 #[test]
 fn settle_via_reflector_rejects_before_expiry() {
     let h = setup(1_000_000, 10_000);

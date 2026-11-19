@@ -61,6 +61,26 @@ fn resolve_matches_what_deploy_actually_produces() {
 }
 
 #[test]
+fn is_deployed_is_false_before_deploy_and_true_after() {
+    let env = Env::default();
+    let (factory_id, _) = setup(&env);
+    let pk = sample_pk(&env, 3);
+    let client = SmartWalletFactoryClient::new(&env, &factory_id);
+
+    assert!(!client.is_deployed(&pk));
+    let (resolved, deployed_before) = client.resolve_with_status(&pk);
+    assert!(!deployed_before);
+
+    let address = client.deploy(&pk);
+
+    assert!(client.is_deployed(&pk));
+    let (resolved_after, deployed_after) = client.resolve_with_status(&pk);
+    assert!(deployed_after);
+    assert_eq!(resolved, address);
+    assert_eq!(resolved_after, address);
+}
+
+#[test]
 fn resolve_differs_for_different_keys() {
     let env = Env::default();
     let factory_id = env.register(SmartWalletFactory, ());
@@ -91,6 +111,30 @@ fn deployed_wallet_is_initialized_with_the_given_key() {
         soroban_sdk::vec![&env],
     );
     assert_eq!(stored_pk, pk);
+}
+
+#[test]
+fn deploy_emits_a_deploy_event_indexing_the_wallet() {
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::{Symbol, TryIntoVal};
+
+    let env = Env::default();
+    let (factory_id, _) = setup(&env);
+    let pk = sample_pk(&env, 9);
+
+    let client = SmartWalletFactoryClient::new(&env, &factory_id);
+    let wallet_address = client.deploy(&pk);
+
+    let events = env.events().all();
+    let (contract, topics, data) = events.last().expect("deploy must emit an event");
+    assert_eq!(contract, factory_id);
+    assert_eq!(topics.len(), 2);
+    let topic0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    let topic1: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(topic0, symbol_short!("deploy"));
+    assert_eq!(topic1, wallet_address);
+    let emitted_pk: BytesN<65> = data.try_into_val(&env).unwrap();
+    assert_eq!(emitted_pk, pk);
 }
 
 #[test]

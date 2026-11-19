@@ -163,6 +163,16 @@ impl Prediction {
     }
 }
 
+/// Which settlement path finalized the market — recorded in the `settle`
+/// event so indexers can tell a Lazer-verified settlement from a
+/// Reflector-promoted one without replaying the transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[contracttype]
+pub enum SettlementSource {
+    Lazer,
+    Reflector,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[contracttype]
 pub enum MarketStatus {
@@ -724,7 +734,7 @@ impl PolarisMarket {
                 .map_err(Self::map_redstone_error)?;
         }
 
-        Self::finalize_settlement(&env, &mut m, final_cents);
+        Self::finalize_settlement(&env, &mut m, final_cents, SettlementSource::Lazer);
         Ok(())
     }
 
@@ -786,7 +796,7 @@ impl PolarisMarket {
                 .map_err(Self::map_redstone_error)?;
         }
 
-        Self::finalize_settlement(&env, &mut m, final_cents);
+        Self::finalize_settlement(&env, &mut m, final_cents, SettlementSource::Reflector);
         Ok(())
     }
 
@@ -807,7 +817,12 @@ impl PolarisMarket {
     /// Shared tail of both settlement paths (`settle`/`settle_via_reflector`)
     /// — once a final price has cleared every configured oracle check,
     /// finalizing is identical regardless of which path produced it.
-    fn finalize_settlement(env: &Env, m: &mut Market, final_cents: i128) {
+    fn finalize_settlement(
+        env: &Env,
+        m: &mut Market,
+        final_cents: i128,
+        source: SettlementSource,
+    ) {
         m.final_price = final_cents;
         m.status = if final_cents >= m.strike_price {
             MarketStatus::ResolvedYes
@@ -822,7 +837,7 @@ impl PolarisMarket {
 
         save_market(env, m);
         env.events()
-            .publish((symbol_short!("settle"),), (m.status, final_cents));
+            .publish((symbol_short!("settle"),), (m.status, final_cents, source));
     }
 
     /// Permissionless liveness backstop: if nobody ever settles, anyone can

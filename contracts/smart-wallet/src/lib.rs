@@ -131,6 +131,7 @@ impl SmartWallet {
         env.storage().instance().set(&STORAGE_KEY_PK, &public_key);
         env.storage().instance().set(&STORAGE_KEY_ORIGIN, &origin);
         touch(&env);
+        env.events().publish((symbol_short!("init"),), origin);
         Ok(())
     }
 

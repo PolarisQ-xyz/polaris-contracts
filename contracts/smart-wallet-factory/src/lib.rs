@@ -17,9 +17,12 @@
 //! that points at this same factory instance — a genuinely portable
 //! identity, not just an implementation detail. `resolve` computes that
 //! address via the exact same on-chain formula `deploy` uses, without
-//! deploying anything — a caller (this system's own backend, or any third
-//! party embedding a market) can check whether a wallet already exists for
-//! a given passkey before prompting a "create wallet" flow. `deploy` itself
+//! deploying anything — but it is a pure derivation, so it says nothing
+//! about whether a wallet actually exists there yet. `is_deployed` (and
+//! `resolve_with_status`, which returns both) is the on-chain existence
+//! check: a caller (this system's own backend, or any third party
+//! embedding a market) can use it to tell an existing wallet from an empty
+//! address before prompting a "create wallet" flow. `deploy` itself
 //! is also naturally idempotent: a second call for the same key fails on
 //! the child's own `AlreadyInitialized` check rather than silently
 //! creating (or, worse, silently reusing) a duplicate.
@@ -108,6 +111,7 @@ impl SmartWalletFactory {
         env.storage().instance().set(&STORAGE_KEY_WASM_HASH, &wasm_hash);
         env.storage().instance().set(&STORAGE_KEY_ORIGIN, &origin);
         touch(&env);
+        env.events().publish((symbol_short!("init"),), (wasm_hash, origin));
         Ok(())
     }
 
@@ -139,14 +143,38 @@ impl SmartWalletFactory {
             vec![&env, public_key.to_val(), origin.to_val()],
         );
         touch(&env);
+        // On-chain index of deployed wallets: topic (deploy, wallet address),
+        // data = the passkey public key the wallet is bound to.
+        env.events()
+            .publish((symbol_short!("deploy"), address.clone()), public_key);
         Ok(address)
     }
 
     /// The address `deploy(public_key)` would produce, computed without
-    /// deploying anything — a pure read, safe to call speculatively.
+    /// deploying anything — a pure read, safe to call speculatively. Note
+    /// this only derives the address; it does not report whether a wallet
+    /// exists there. Use `is_deployed` for that.
     pub fn resolve(env: Env, public_key: BytesN<65>) -> Address {
         let salt = env.crypto().sha256(&public_key.into());
         env.deployer().with_current_contract(salt).deployed_address()
+    }
+
+    /// Whether a wallet has actually been deployed for `public_key` at the
+    /// address `resolve` computes. `resolve` alone can't tell an existing
+    /// wallet from an empty address — it's a pure derivation — so callers
+    /// that need to know whether a "create wallet" flow is still required
+    /// should use this (or `resolve_with_status`) instead.
+    pub fn is_deployed(env: Env, public_key: BytesN<65>) -> bool {
+        let salt = env.crypto().sha256(&public_key.into());
+        let address = env.deployer().with_current_contract(salt).deployed_address();
+        env.deployer().get_contract_instance_wasm_hash(&address).is_some()
+    }
+
+    /// `resolve` plus `is_deployed` in one call: the deterministic address
+    /// for `public_key`, and whether a wallet already exists there.
+    pub fn resolve_with_status(env: Env, public_key: BytesN<65>) -> (Address, bool) {
+        let address = Self::resolve(env.clone(), public_key.clone());
+        (address, Self::is_deployed(env, public_key))
     }
 }
 

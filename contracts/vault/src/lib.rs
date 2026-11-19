@@ -110,6 +110,7 @@ impl Vault {
         env.storage().instance().set(&STORAGE_KEY_COLLATERAL, &collateral);
         env.storage().instance().set(&STORAGE_KEY_TOTAL_DEPOSITED, &0i128);
         touch(&env);
+        env.events().publish((symbol_short!("init"),), (admin, collateral));
         Ok(())
     }
 

@@ -6,8 +6,8 @@ use market_contract::Client as MarketClient;
 use market_contract::OracleFeedConfig;
 use polaris_mock_lazer::MockLazer;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    token, Bytes, Env,
+    testutils::{Address as _, Events as _, Ledger},
+    token, Bytes, Env, IntoVal, Symbol, TryIntoVal,
 };
 
 const FEED_ID: u32 = 100;
@@ -180,6 +180,23 @@ fn deposit_before_initialize_rejected() {
     let client = VaultClient::new(&env, &vault_id);
     let result = client.try_deposit(&admin, &100);
     assert_eq!(result, Err(Ok(Error::NotInitialized)));
+}
+
+#[test]
+fn initialize_emits_init_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let collateral = Address::generate(&env);
+    let vault_id = env.register(Vault, ());
+    VaultClient::new(&env, &vault_id).initialize(&admin, &collateral);
+
+    let (contract, topics, data) = env.events().all().last().unwrap();
+    assert_eq!(contract, vault_id);
+    assert_eq!(topics, soroban_sdk::vec![&env, Symbol::new(&env, "init").into_val(&env)]);
+    let (got_admin, got_collateral): (Address, Address) = data.try_into_val(&env).unwrap();
+    assert_eq!(got_admin, admin);
+    assert_eq!(got_collateral, collateral);
 }
 
 #[test]

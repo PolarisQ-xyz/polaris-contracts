@@ -296,6 +296,21 @@ address regardless of which frontend calls the factory — `resolve(public_key)`
 computes that address without deploying anything, so a caller can check
 whether a wallet already exists before prompting a "create wallet" flow.
 
+### Deploy events
+
+Every successful `deploy(public_key)` emits a Soroban contract event from the
+factory, giving an on-chain index of deployed wallets without any off-chain
+bookkeeping:
+
+- **Topics:** `(symbol_short!("deploy"), wallet_address)` — the deployed
+  wallet's contract address.
+- **Data:** the 65-byte uncompressed SEC1 `public_key` the wallet is bound to
+  (the same value `resolve()` hashes, so an indexer can map key → address
+  directly from the event).
+
+A failed deploy (e.g. redeploying an existing key) emits nothing, since the
+event is published only after the child contract's `init` call succeeds.
+
 ### Factory wasm pinning — a real, confirmed-exploitable bug that shipped fixed
 
 `smart-wallet-factory`'s `deploy()` used to take `wasm_hash` as a caller-
