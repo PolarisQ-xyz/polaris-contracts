@@ -351,6 +351,40 @@ fn init_rejects_bad_params() {
         Err(Ok(Error::InvalidRedstoneConfig)),
         "same staleness-vs-resolution validation applies to an optionally-configured RedStone leg"
     );
+
+    // An oversize window is rejected on each leg: the staleness comparison
+    // adds it to an oracle-supplied timestamp, so an unbounded value could
+    // overflow `u64` and trap every settle.
+    let oversize_reflector = env.register(PolarisMarket, ());
+    let c = PolarisMarketClient::new(&env, &oversize_reflector);
+    let reflector_too_wide = OracleFeedConfig {
+        contract: reflector_id.clone(),
+        asset: polaris_ctf_math::sep40::Asset::Other(Symbol::new(&env, "XLM")),
+        max_staleness_secs: MAX_STALENESS_SECS + 1,
+        tolerance_bps: REFLECTOR_TOLERANCE_BPS,
+    };
+    assert_eq!(
+        c.try_initialize(&admin, &token_id, &6_000_000i128, &expiry, &3600u64, &lazer_id, &FEED_ID, &100u32, &20u32, &treasury, &1000i128, &reflector_too_wide, &None),
+        Err(Ok(Error::InvalidReflectorConfig)),
+        "a staleness window above MAX_STALENESS_SECS must be rejected"
+    );
+
+    let oversize_redstone = env.register(PolarisMarket, ());
+    let c = PolarisMarketClient::new(&env, &oversize_redstone);
+    let redstone_too_wide = OracleFeedConfig {
+        contract: redstone_id.clone(),
+        asset: polaris_ctf_math::sep40::Asset::Stellar(Address::generate(&env)),
+        max_staleness_secs: u64::MAX,
+        tolerance_bps: REFLECTOR_TOLERANCE_BPS,
+    };
+    assert_eq!(
+        c.try_initialize(
+            &admin, &token_id, &6_000_000i128, &expiry, &3600u64, &lazer_id, &FEED_ID, &100u32, &20u32,
+            &treasury, &1000i128, &reflector_config, &Some(redstone_too_wide),
+        ),
+        Err(Ok(Error::InvalidRedstoneConfig)),
+        "same oversize cap applies to an optionally-configured RedStone leg"
+    );
 }
 
 #[test]
@@ -843,6 +877,21 @@ fn settle_via_reflector_rejects_a_stale_price() {
     let stale_ts = h.expiry - REFLECTOR_MAX_STALENESS_SECS - 1;
     let reflector_client = mock_sep40::MockSep40Client::new(&h.env, &h.reflector_id);
     reflector_client.set_price(&(1_000_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &stale_ts);
+    let res = client.try_settle_via_reflector();
+    assert_eq!(res, Err(Ok(Error::ReflectorPriceStale)));
+    assert_eq!(client.get_market().status, MarketStatus::Open);
+}
+
+#[test]
+fn settle_via_reflector_does_not_overflow_on_a_u64_max_adjacent_timestamp() {
+    // `price.timestamp + max_staleness_secs` used to trap the whole call on
+    // an oracle-supplied timestamp near `u64::MAX`; the comparison is now
+    // saturating, so this fails closed as merely stale instead.
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+    let reflector_client = mock_sep40::MockSep40Client::new(&h.env, &h.reflector_id);
+    reflector_client.set_price(&(1_000_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &(u64::MAX - 1));
     let res = client.try_settle_via_reflector();
     assert_eq!(res, Err(Ok(Error::ReflectorPriceStale)));
     assert_eq!(client.get_market().status, MarketStatus::Open);

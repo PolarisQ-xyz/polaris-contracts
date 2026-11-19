@@ -201,6 +201,12 @@ pub struct OracleFeedConfig {
     pub tolerance_bps: u32,
 }
 
+/// Upper bound on any leg's `max_staleness_secs` (one day). Not a tuning
+/// knob: the staleness comparison adds this to an oracle-supplied
+/// `timestamp`, so an unbounded value could overflow `u64` and trap every
+/// settle. Each contract's `initialize` rejects anything above this.
+pub const MAX_STALENESS_SECS: u64 = 86_400;
+
 /// What can go wrong verifying one corroborating oracle leg against a
 /// reference price — deliberately generic, not per-provider: the caller
 /// (each contract's `settle`/`record_price_checkpoint`) already knows
@@ -241,7 +247,9 @@ pub fn verify_oracle_corroboration(
 ) -> Result<(), OracleCheckError> {
     let client = sep40::Sep40Client::new(env, &cfg.contract);
     let price = client.lastprice(&cfg.asset).ok_or(OracleCheckError::Unavailable)?;
-    if price.timestamp + cfg.max_staleness_secs < now {
+    // Saturating, not `+`: `price.timestamp` is oracle-supplied and can sit
+    // near `u64::MAX`, which would otherwise trap the whole call.
+    if price.timestamp.saturating_add(cfg.max_staleness_secs) < now {
         return Err(OracleCheckError::Stale);
     }
     let decimals = client.decimals();
