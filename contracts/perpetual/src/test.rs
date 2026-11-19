@@ -262,6 +262,43 @@ fn sell_full_one_sided_position_returns_nonzero_collateral() {
 }
 
 #[test]
+fn buy_return_equals_position_delta_on_bought_side() {
+    let h = setup(10_000, true);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
+
+    let (yes_before, no_before) = client.get_position(&user);
+    let returned = client.buy(&user, &Prediction::Yes, &1_000, &0);
+    let (yes_after, no_after) = client.get_position(&user);
+
+    assert_eq!(returned, yes_after - yes_before);
+    assert_eq!(no_after, no_before);
+    assert_solvent(&h);
+}
+
+#[test]
+fn sell_return_equals_collateral_received() {
+    let h = setup(10_000, true);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
+    let token = token::Client::new(&h.env, &h.token_id);
+
+    let shares = client.buy(&user, &Prediction::Yes, &1_000, &0);
+    let (yes_before, _) = client.get_position(&user);
+    let balance_before = token.balance(&user);
+
+    let returned = client.sell(&user, &Prediction::Yes, &shares, &0);
+    let (yes_after, _) = client.get_position(&user);
+    let balance_after = token.balance(&user);
+
+    assert_eq!(returned, balance_after - balance_before);
+    assert_eq!(returned, yes_before - yes_after);
+    assert_solvent(&h);
+}
+
+#[test]
 fn buy_large_enough_to_exhaust_a_reserve_is_rejected() {
     let h = setup(10_000, true);
     let client = PolarisPerpetualClient::new(&h.env, &h.market_id);

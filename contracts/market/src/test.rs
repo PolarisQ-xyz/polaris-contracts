@@ -557,6 +557,43 @@ fn sell_full_one_sided_position_returns_nonzero_collateral() {
 }
 
 #[test]
+fn buy_return_equals_position_delta_on_bought_side() {
+    let h = setup(1_000_000, 10_000);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+
+    let (yes_before, no_before) = client.get_position(&user);
+    let returned = client.buy(&user, &Prediction::Yes, &1_000, &0);
+    let (yes_after, no_after) = client.get_position(&user);
+
+    assert_eq!(returned, yes_after - yes_before);
+    assert_eq!(no_after, no_before);
+    assert_solvent(&h);
+}
+
+#[test]
+fn sell_return_equals_collateral_received() {
+    let h = setup(1_000_000, 10_000);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 5_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    let token = token::Client::new(&h.env, &h.token_id);
+
+    let shares = client.buy(&user, &Prediction::Yes, &1_000, &0);
+    let (yes_before, _) = client.get_position(&user);
+    let balance_before = token.balance(&user);
+
+    let returned = client.sell(&user, &Prediction::Yes, &shares, &0);
+    let (yes_after, _) = client.get_position(&user);
+    let balance_after = token.balance(&user);
+
+    assert_eq!(returned, balance_after - balance_before);
+    assert_eq!(returned, yes_before - yes_after);
+    assert_solvent(&h);
+}
+
+#[test]
 fn buy_after_expiry_rejected() {
     let h = setup(1_000_000, 10_000);
     let user = Address::generate(&h.env);
@@ -1278,5 +1315,44 @@ fn cancel_redeem_stays_solvent_for_every_holder_including_treasury() {
     assert_eq!(treasury_payout, 10_000); // (10_000 + 10_000) / 2
 
     assert_eq!(user_payout + treasury_payout, 11_000); // == total_supply at cancellation, exactly
+    assert_solvent(&h);
+}
+
+// ---------- regression: Reflector diverging while RedStone agrees must
+// still reject, and must not strand the market ----------
+
+#[test]
+fn settle_rejects_on_reflector_divergence_even_when_redstone_agrees() {
+    // The existing coverage only exercised the converse (RedStone diverging
+    // while Reflector agrees). Corroboration is unanimous, not a majority
+    // vote: a single disagreeing leg must reject the whole settlement even
+    // when every other leg — here RedStone — matches Lazer exactly. And
+    // because `settle` mutates nothing before the cross-check, the market
+    // must stay `Open` and settle normally once Reflector is corrected.
+    let (h, redstone_id) = setup_with_redstone(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+
+    h.env.ledger().set_timestamp(h.expiry + 10);
+    let lazer_cents = 1_000_000i128;
+    let payload = soroban_sdk::Bytes::from_slice(
+        &h.env,
+        &build_payload(FEED_ID, lazer_cents as i64, -2, (h.expiry + 10) * 1_000_000),
+    );
+
+    // RedStone agrees with Lazer; Reflector is far off (well beyond the
+    // 150 bps tolerance).
+    set_redstone_price_cents(&h.env, &redstone_id, lazer_cents);
+    set_reflector_price_cents(&h, lazer_cents * 2);
+
+    assert_eq!(
+        client.try_settle(&payload),
+        Err(Ok(Error::OracleDivergence))
+    );
+    assert_eq!(client.get_market().status, MarketStatus::Open);
+
+    // Not stranded: correcting Reflector lets the same payload settle.
+    set_reflector_price_cents(&h, lazer_cents);
+    client.settle(&payload);
+    assert_eq!(client.get_market().status, MarketStatus::Settled);
     assert_solvent(&h);
 }

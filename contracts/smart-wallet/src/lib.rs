@@ -72,6 +72,28 @@
 //! already used for this project's other no-rotation gaps (see this
 //! repo's vault admin-rotation issue) — existing wallets keep running
 //! their original wasm, bound to their original origin, unaffected.
+//!
+//! ## Accepted `clientDataJSON` shapes (and deliberate rejections)
+//!
+//! `client_data_json` is parsed with `serde-json-core` into a struct holding
+//! only `type`, `challenge` and `origin`; every other field is ignored. The
+//! test matrix in `test.rs` pins the resulting behaviour:
+//! - **Accepted**: extra fields before/after the checked ones (`tokenBinding`,
+//!   `topOrigin`, `crossOrigin`, …), any field order, `crossOrigin:false`,
+//!   and escaped characters (`\uXXXX`, `\/`, `\"`) inside *non-checked*
+//!   fields. The signature covers the exact bytes, so these are genuine
+//!   vectors, not byte-edited ones.
+//! - **Deliberately rejected**: malformed JSON, missing `type`/`challenge`/
+//!   `origin`, and non-string values for those keys — all
+//!   `ClientDataJsonParseError`. Escapes inside a *checked* field are
+//!   compared after decoding, so `"https:\/\/…"` still matches the stored
+//!   origin; an escape that decodes to a different value is an
+//!   `OriginMismatch`/`ChallengeMismatch`/`TypeMismatch`, never a silent
+//!   pass.
+//! - **Known gap, not enforced here**: `crossOrigin:true` is *not* rejected
+//!   by this contract — the field is not parsed, so a ceremony relayed from
+//!   an iframe would pass. The frontend must refuse to submit such
+//!   assertions; adding the check on-chain is tracked separately.
 
 use soroban_sdk::{
     auth::{Context, CustomAccountInterface},
@@ -153,9 +175,10 @@ impl SmartWallet {
 /// authorization "signature". `signature` is the raw 64-byte r‖s ECDSA
 /// signature. Browsers return DER by default, and DER-decoded (r, s) is not
 /// guaranteed low-S — Soroban's `secp256r1_verify` traps on a high-S
-/// signature (confirmed empirically in `test.rs`: an otherwise-valid
-/// signature generated without normalizing was rejected by the host until
-/// `s` was replaced with `n - s`). The frontend must convert DER to raw r‖s
+/// signature (regression-tested by
+/// `test.rs::high_s_variant_of_a_valid_signature_rejected`, which shows the
+/// same bytes passing with low-S and being rejected once `s` is replaced
+/// with `n - s`). The frontend must convert DER to raw r‖s
 /// *and* normalize to low-S before submitting; see
 /// `polaris-frontend`'s `lib/webauthn.ts`.
 #[derive(Clone)]
