@@ -601,18 +601,25 @@ live.
 
 ```sh
 # unit tests (native target; 100 across the whole workspace)
-cargo test --workspace
+cargo test --locked --workspace
 
 # release WASM (requires `rustup target add wasm32v1-none`)
 # polaris-market first, on its own — polaris-vault's contractimport! reads
 # its compiled wasm as a file at build time, a dependency Cargo's own
 # graph doesn't know about (see "The capital-efficiency vault" above).
-cargo build --release --target wasm32v1-none -p polaris-market
-cargo build --release --target wasm32v1-none -p polaris-mock-lazer \
+cargo build --locked --release --target wasm32v1-none -p polaris-market
+cargo build --locked --release --target wasm32v1-none -p polaris-mock-lazer \
   -p polaris-mock-redstone -p polaris-smart-wallet -p polaris-smart-wallet-factory \
   -p polaris-vault -p polaris-perpetual
 shasum -a 256 target/wasm32v1-none/release/*.wasm
 ```
+
+`Cargo.lock` is committed and every build above uses `--locked`, so a fresh
+clone resolves the exact same dependency versions. The hashes below were
+produced with the stable toolchain CI uses (`dtolnay/rust-toolchain@stable`);
+a different `rustc`/`soroban-sdk` build can still change the bytes, so if a
+rebuild from a fresh clone does not match, check `rustc --version` before
+assuming a source change.
 
 | Crate | Unit tests |
 |---|---|
@@ -638,6 +645,32 @@ actually uploaded):
 | `polaris_smart_wallet.wasm` | 27,049 bytes | `bb2e397ba9d56cb58649941576c51e452063554bb43d15d4dfbd29987b1f7dbf` |
 | `polaris_smart_wallet_factory.wasm` | 7,583 bytes | `d64cd44f402db8fb657e8256b20ef7c1b89ebb011bf5adf7e48e3ca335729710` |
 | `polaris_vault.wasm` | 10,568 bytes | `5847a7781556d7c4e727e63fe48a84d6bed9ff6c34686e6a0b09a03d3c925c3d` |
+
+## CPU & memory budget
+
+Settlement (`market::settle`, `market::settle_via_reflector`) and the
+perpetual's `record_price_checkpoint` each read all three oracle legs
+(Lazer payload, Reflector, RedStone). Regression tests pin their measured
+cost below **70% of Stellar mainnet's per-transaction limits** so a future
+change can't quietly push them toward the ceiling:
+
+| Entrypoint | Test | CPU instructions | Memory (bytes) |
+|---|---|---|---|
+| `market::settle` | `settle_with_all_three_oracle_legs_stays_within_budget` | measured by the test (`std::println!`) | measured by the test |
+| `market::settle_via_reflector` | `settle_via_reflector_with_all_three_oracle_legs_stays_within_budget` | measured by the test | measured by the test |
+| `perpetual::record_price_checkpoint` | `checkpoint_with_all_three_oracle_legs_stays_within_budget` | measured by the test | measured by the test |
+
+Network limits (Stellar mainnet, per transaction) and the asserted ceilings:
+
+| Resource | Mainnet limit | Asserted ceiling (70%) |
+|---|---|---|
+| CPU instructions | 100,000,000 | 70,000,000 |
+| Memory | 40 MB (41,943,040 bytes) | 28,000,000 bytes |
+
+Each test calls `env.cost_estimate().budget().reset_unlimited()` immediately
+before the entrypoint, then asserts `cpu_instruction_cost()` and
+`memory_bytes_cost()` stay under the ceilings above. Run
+`cargo test --workspace -- --nocapture` to print the measured numbers.
 
 ## Deploying
 

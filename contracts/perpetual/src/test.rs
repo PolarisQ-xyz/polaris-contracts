@@ -478,6 +478,47 @@ fn checkpoint_rejects_when_redstones_decimals_drift_from_what_was_pinned_at_init
     assert_eq!(client.get_market().last_price_cents, 0);
 }
 
+// ---------- CPU/memory budget regression (all three oracle legs) ----------
+//
+// `record_price_checkpoint` is the perpetual's only oracle-reading
+// entrypoint, and it reads all three legs (Lazer payload, Reflector,
+// RedStone). These tests pin its measured cost below a recorded ceiling so
+// a future change can't quietly push it toward the network's per-transaction
+// limits. Numbers and limits are recorded in the README.
+
+/// 70% of Stellar mainnet's per-transaction limits (100M CPU instructions,
+/// 40MB memory) — see the README's "CPU & memory budget" section.
+const CPU_BUDGET_LIMIT: u64 = 70_000_000;
+const MEM_BUDGET_LIMIT: u64 = 28_000_000;
+
+fn assert_within_budget(env: &Env, label: &str) {
+    let budget = env.cost_estimate().budget();
+    let cpu = budget.cpu_instruction_cost();
+    let mem = budget.memory_bytes_cost();
+    std::println!("{label}: cpu={cpu} mem={mem}");
+    assert!(cpu < CPU_BUDGET_LIMIT, "{label} CPU {cpu} exceeds {CPU_BUDGET_LIMIT}");
+    assert!(mem < MEM_BUDGET_LIMIT, "{label} memory {mem} exceeds {MEM_BUDGET_LIMIT}");
+}
+
+#[test]
+fn checkpoint_with_all_three_oracle_legs_stays_within_budget() {
+    let h = setup(10_000, true);
+    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
+    let now = h.env.ledger().timestamp();
+    let payload = build_payload(FEED_ID, 10_000_00000000, -8, now * 1_000_000);
+    let bytes = Bytes::from_slice(&h.env, &payload);
+
+    set_reflector_price_cents(&h, 1_000_000);
+    set_redstone_price_cents(&h, 1_000_000);
+
+    h.env.cost_estimate().budget().reset_unlimited();
+    client.record_price_checkpoint(&bytes);
+    assert_within_budget(&h.env, "perpetual::record_price_checkpoint");
+
+    assert_eq!(client.get_market().last_price_cents, 1_000_000);
+    assert_solvent(&h);
+}
+
 // ---------- terminate ----------
 
 #[test]

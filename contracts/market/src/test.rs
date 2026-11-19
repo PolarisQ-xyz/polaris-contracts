@@ -922,6 +922,61 @@ fn settle_via_reflector_still_requires_redstone_agreement_when_configured() {
     assert_eq!(client.get_market().status, MarketStatus::ResolvedYes);
 }
 
+// ---------- CPU/memory budget regression (all three oracle legs) ----------
+//
+// Both settlement paths read all three oracle legs (Lazer payload, Reflector,
+// RedStone). These tests pin their measured cost below a recorded ceiling so
+// a future change can't quietly push settlement toward the network's
+// per-transaction limits. Numbers and limits are recorded in the README.
+
+/// 70% of Stellar mainnet's per-transaction limits (100M CPU instructions,
+/// 40MB memory) — see the README's "CPU & memory budget" section.
+const CPU_BUDGET_LIMIT: u64 = 70_000_000;
+const MEM_BUDGET_LIMIT: u64 = 28_000_000;
+
+fn assert_within_budget(env: &Env, label: &str) {
+    let budget = env.cost_estimate().budget();
+    let cpu = budget.cpu_instruction_cost();
+    let mem = budget.memory_bytes_cost();
+    std::println!("{label}: cpu={cpu} mem={mem}");
+    assert!(cpu < CPU_BUDGET_LIMIT, "{label} CPU {cpu} exceeds {CPU_BUDGET_LIMIT}");
+    assert!(mem < MEM_BUDGET_LIMIT, "{label} memory {mem} exceeds {MEM_BUDGET_LIMIT}");
+}
+
+#[test]
+fn settle_with_all_three_oracle_legs_stays_within_budget() {
+    let (h, redstone_id) = setup_with_redstone(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+    let payload = build_payload(FEED_ID, 10_000_00000000, -8, h.expiry * 1_000_000);
+    let bytes = Bytes::from_slice(&h.env, &payload);
+    set_reflector_price_cents(&h, 1_000_000);
+    set_redstone_price_cents(&h.env, &redstone_id, 1_000_000);
+
+    h.env.cost_estimate().budget().reset_unlimited();
+    client.settle(&bytes);
+    assert_within_budget(&h.env, "market::settle");
+
+    assert_eq!(client.get_market().status, MarketStatus::ResolvedYes);
+    assert_solvent(&h);
+}
+
+#[test]
+fn settle_via_reflector_with_all_three_oracle_legs_stays_within_budget() {
+    let (h, redstone_id) = setup_with_redstone(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+    set_reflector_price_cents(&h, 1_000_000);
+    set_redstone_price_cents(&h.env, &redstone_id, 1_000_000);
+
+    h.env.cost_estimate().budget().reset_unlimited();
+    client.settle_via_reflector();
+    assert_within_budget(&h.env, "market::settle_via_reflector");
+
+    assert_eq!(client.get_market().status, MarketStatus::ResolvedYes);
+    assert_solvent(&h);
+}
+
 // ---------- on-chain RedStone cross-check (optional third leg) ----------
 
 #[test]

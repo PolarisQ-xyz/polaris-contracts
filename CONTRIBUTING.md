@@ -38,6 +38,9 @@ cargo test --workspace
 cargo build --release --target wasm32v1-none -p polaris-market
 ```
 
+`Cargo.lock` is committed — build with `--locked` (as CI does) to reproduce
+the exact dependency versions behind the published WASM hashes.
+
 ## Communication
 
 Discussion happens in GitHub issues and pull requests. There's no

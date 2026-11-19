@@ -14,3 +14,7 @@ serde-json-core = { version = "0.6", default-features = false }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+# Test-only: lets `test.rs` generate fresh WebAuthn assertions (and edge-case
+# vectors) instead of relying on hardcoded bytes produced off-repo. Never
+# linked into the release wasm — dev-dependencies are not built for `cdylib`.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }

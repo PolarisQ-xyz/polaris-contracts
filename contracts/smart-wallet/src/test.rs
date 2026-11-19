@@ -1,9 +1,132 @@
 #![cfg(test)]
 
 use super::*;
+use p256::ecdsa::{signature::hazmat::PrehashSigner, Signature as P256Signature, SigningKey};
 use soroban_sdk::{vec, BytesN, Env, IntoVal};
 
 const ORIGIN: &[u8] = b"https://polaris-frontend-iota.vercel.app";
+
+/// Deterministic test keypair (P-256). Any 32-byte scalar in `[1, n-1]` works;
+/// this one is fixed so failures are reproducible.
+const TEST_SK: [u8; 32] = [
+    0x4c, 0x0b, 0x1f, 0x8a, 0x2d, 0x9e, 0x63, 0x71, 0x55, 0x3c, 0x0a, 0x18, 0x7f, 0x92, 0x44, 0x6b,
+    0x21, 0xd8, 0x35, 0x0e, 0x9a, 0x57, 0xc4, 0x12, 0x88, 0x6d, 0x3f, 0xa1, 0x0c, 0x74, 0x5e, 0x29,
+];
+
+/// Unpadded base64url, mirroring `base64_url::encode` (test-side, so the
+/// helper doesn't depend on the contract's fixed-size buffer).
+fn b64url(data: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let val = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        out.push(ALPHABET[(val >> 18 & 0x3F) as usize] as char);
+        out.push(ALPHABET[(val >> 12 & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(val >> 6 & 0x3F) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(val & 0x3F) as usize] as char);
+        }
+    }
+    out
+}
+
+/// Builds a WebAuthn assertion for `payload` and signs it exactly the way
+/// `__check_auth` verifies it: `sha256(authenticator_data ‖
+/// sha256(client_data_json))`, raw r‖s, normalized to low-S (Soroban's
+/// `secp256r1_verify` rejects high-S outright).
+///
+/// - `pk`: 65-byte uncompressed SEC1 public key to sign with (must match the
+///   key derived from `TEST_SK`; passed in so callers can `init` with it).
+/// - `origin`: relying-party origin embedded in `client_data_json`.
+/// - `type_`: ceremony type, normally `"webauthn.get"`.
+/// - `flags`: authenticator data flags byte (e.g. `0x05` = UP|UV).
+/// - `extra_cdj`: extra raw JSON members appended inside `client_data_json`
+///   (e.g. `b",\"crossOrigin\":false"`), for edge-case vectors.
+fn sign_assertion(
+    env: &Env,
+    pk: &BytesN<65>,
+    payload: &BytesN<32>,
+    origin: &[u8],
+    type_: &str,
+    flags: u8,
+    extra_cdj: &[u8],
+) -> Signature {
+    let signing_key = SigningKey::from_slice(&TEST_SK).expect("valid test scalar");
+    let derived = signing_key.verifying_key().to_encoded_point(false);
+    assert_eq!(
+        derived.as_bytes(),
+        pk.to_array().as_slice(),
+        "TEST_SK does not match the supplied public key"
+    );
+
+    // authenticator_data: rpIdHash(32) ‖ flags(1) ‖ signCount(4).
+    let mut authenticator_data = [0u8; 37];
+    authenticator_data[32] = flags;
+    authenticator_data[33..37].copy_from_slice(&5u32.to_be_bytes());
+
+    let mut cdj = Vec::new();
+    cdj.extend_from_slice(b"{\"type\":\"");
+    cdj.extend_from_slice(type_.as_bytes());
+    cdj.extend_from_slice(b"\",\"challenge\":\"");
+    cdj.extend_from_slice(b64url(&payload.to_array()).as_bytes());
+    cdj.extend_from_slice(b"\",\"origin\":\"");
+    cdj.extend_from_slice(origin);
+    cdj.push(b'"');
+    cdj.extend_from_slice(extra_cdj);
+    cdj.push(b'}');
+
+    let mut signed = Vec::new();
+    signed.extend_from_slice(&authenticator_data);
+    signed.extend_from_slice(&env.crypto().sha256(&Bytes::from_slice(env, &cdj)).to_array());
+    let digest = env.crypto().sha256(&Bytes::from_slice(env, &signed)).to_array();
+
+    let sig: P256Signature = signing_key
+        .sign_prehash(&digest)
+        .expect("prehash signing cannot fail");
+    let sig = sig.normalize_s().unwrap_or(sig);
+    let mut raw = [0u8; 64];
+    raw[..32].copy_from_slice(&sig.r().to_bytes());
+    raw[32..].copy_from_slice(&sig.s().to_bytes());
+
+    Signature {
+        authenticator_data: Bytes::from_slice(env, &authenticator_data),
+        client_data_json: Bytes::from_slice(env, &cdj),
+        signature: BytesN::from_array(env, &raw),
+    }
+}
+
+/// The public key matching `TEST_SK`, as the 65-byte uncompressed SEC1 point
+/// `init` expects.
+fn test_public_key(env: &Env) -> BytesN<65> {
+    let signing_key = SigningKey::from_slice(&TEST_SK).expect("valid test scalar");
+    let point = signing_key.verifying_key().to_encoded_point(false);
+    let mut raw = [0u8; 65];
+    raw.copy_from_slice(point.as_bytes());
+    BytesN::from_array(env, &raw)
+}
+
+/// Convenience wrapper: a valid `webauthn.get` assertion over `payload` for
+/// `ORIGIN`, with the standard UP|UV flags and `crossOrigin:false`.
+fn assertion(env: &Env, payload: &BytesN<32>) -> (BytesN<65>, Signature) {
+    let pk = test_public_key(env);
+    let signature = sign_assertion(
+        env,
+        &pk,
+        payload,
+        ORIGIN,
+        "webauthn.get",
+        0x05,
+        b",\"crossOrigin\":false",
+    );
+    (pk, signature)
+}
 
 /// A real, self-verified secp256r1 keypair + WebAuthn assertion, generated
 /// with Node's `crypto`/`@noble/curves` (P-256, IEEE-P1363/raw signature
