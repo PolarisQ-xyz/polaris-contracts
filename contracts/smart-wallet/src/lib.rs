@@ -93,6 +93,9 @@ const STORAGE_KEY_ORIGIN: Symbol = symbol_short!("origin");
 /// for a long stretch needs an explicit extend, not an incidental one.
 const BUMP_TO: u32 = 535_680;
 const BUMP_THRESHOLD: u32 = 500_000;
+/// Largest `client_data_json` accepted by `__check_auth`; must match the
+/// buffer size passed to `to_buffer` below.
+const MAX_CLIENT_DATA_JSON_LEN: u32 = 1024;
 
 fn touch(env: &Env) {
     env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
@@ -108,6 +111,7 @@ pub enum Error {
     ClientDataJsonParseError = 4,
     OriginMismatch = 5,
     TypeMismatch = 6,
+    InvalidPublicKey = 7,
 }
 
 #[contract]
@@ -124,9 +128,23 @@ impl SmartWallet {
     /// `origin` is fixed for the wallet's lifetime, same as `public_key` —
     /// see `__check_auth`'s doc comment for why this can't be a
     /// `deploy()`-time caller parameter instead.
+    ///
+    /// The key must be an *uncompressed* SEC1 point, i.e. its first byte
+    /// must be `0x04`; anything else (compressed `0x02`/`0x03`, hybrid
+    /// `0x06`/`0x07`, or garbage) is rejected with `InvalidPublicKey`.
+    /// Note this is a cheap prefix check only: a full on-curve check would
+    /// need 256-bit modular arithmetic (field/curve constants, point
+    /// addition, `y² = x³ - 3x + b mod p`) which is not available in the
+    /// Soroban host API and is too expensive to hand-roll here. A key that
+    /// passes this check but is not on the curve simply can never produce a
+    /// valid signature, so it can only brick its own wallet — never
+    /// authorize anything.
     pub fn init(env: Env, public_key: BytesN<65>, origin: Bytes) -> Result<(), Error> {
         if env.storage().instance().has(&STORAGE_KEY_PK) {
             return Err(Error::AlreadyInitialized);
+        }
+        if public_key.get(0) != Some(0x04) {
+            return Err(Error::InvalidPublicKey);
         }
         env.storage().instance().set(&STORAGE_KEY_PK, &public_key);
         env.storage().instance().set(&STORAGE_KEY_ORIGIN, &origin);
@@ -158,6 +176,10 @@ impl SmartWallet {
 /// `s` was replaced with `n - s`). The frontend must convert DER to raw r‖s
 /// *and* normalize to low-S before submitting; see
 /// `polaris-frontend`'s `lib/webauthn.ts`.
+///
+/// `client_data_json` must be at most 1024 bytes: it is decoded into a
+/// fixed 1024-byte buffer, and a longer payload is rejected with
+/// `Error::ClientDataJsonParseError` rather than trapping.
 #[derive(Clone)]
 #[soroban_sdk::contracttype]
 pub struct Signature {
@@ -208,6 +230,11 @@ impl CustomAccountInterface for SmartWallet {
         // challenge was signed by this key, not that *this transaction*
         // was. Bind them by checking the browser-supplied challenge field
         // equals what the host computed for this specific invocation tree.
+        // `to_buffer` traps on overflow, so reject oversized payloads first
+        // and surface them as a typed error instead.
+        if signature.client_data_json.len() > MAX_CLIENT_DATA_JSON_LEN {
+            return Err(Error::ClientDataJsonParseError);
+        }
         let client_data_json = signature.client_data_json.to_buffer::<1024>();
         let (client_data, _): (ClientDataJson, _) =
             serde_json_core::de::from_slice(client_data_json.as_slice())

@@ -145,6 +145,12 @@ pub enum Error {
     /// by this, only the AMM-math-dependent entrypoints a pause exists to
     /// protect against.
     Paused = 35,
+    /// `accept_admin` called with no `propose_admin` ever having been
+    /// called (or one already consumed by a prior `accept_admin`).
+    NoPendingAdmin = 36,
+    /// An admin-gated entrypoint was called by an address other than the
+    /// stored admin — see `require_admin`.
+    Unauthorized = 37,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,6 +242,11 @@ pub enum DataKey {
     /// additive for old and new instances alike. See #4's identical
     /// reasoning for `vault`'s `PendingAdmin` key.
     Paused,
+    /// Set only between a `propose_admin` and the matching `accept_admin` —
+    /// absent the rest of the time. Own key, not a `Market` field, for the
+    /// same additive-only reason as `Paused` above; mirrors `polaris-vault`'s
+    /// `PendingAdmin` (#4, ported here by #86).
+    PendingAdmin,
 }
 
 fn touch(env: &Env) {
@@ -262,6 +273,18 @@ fn load_redstone_oracle(env: &Env) -> Option<RedstoneOracle> {
 
 fn is_paused(env: &Env) -> bool {
     env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+}
+
+/// Identity check first, then `require_auth` — same pattern as
+/// `polaris-vault`'s `require_admin`: a mismatched caller gets a clear typed
+/// error rather than an auth trap.
+fn require_admin(env: &Env, admin: &Address) -> Result<(), Error> {
+    let m = load_market(env)?;
+    if m.admin != *admin {
+        return Err(Error::Unauthorized);
+    }
+    admin.require_auth();
+    Ok(())
 }
 
 fn balance_of(env: &Env, side: Prediction, addr: &Address) -> i128 {
@@ -450,7 +473,7 @@ impl PolarisMarket {
     /// waiting for natural expiry.
     pub fn pause(env: Env) -> Result<(), Error> {
         let m = load_market(&env)?;
-        m.admin.require_auth();
+        require_admin(&env, &m.admin)?;
         env.storage().instance().set(&DataKey::Paused, &true);
         touch(&env);
         env.events().publish((symbol_short!("paused"),), ());
@@ -459,7 +482,7 @@ impl PolarisMarket {
 
     pub fn unpause(env: Env) -> Result<(), Error> {
         let m = load_market(&env)?;
-        m.admin.require_auth();
+        require_admin(&env, &m.admin)?;
         env.storage().instance().set(&DataKey::Paused, &false);
         touch(&env);
         env.events().publish((symbol_short!("unpaused"),), ());
@@ -468,6 +491,53 @@ impl PolarisMarket {
 
     pub fn is_paused(env: Env) -> bool {
         is_paused(&env)
+    }
+
+    /// Step 1 of a two-step admin rotation — ported verbatim from
+    /// `polaris-vault` (#4, see #86). Deliberately not a single-call
+    /// `set_admin`: a typo'd/unreachable `proposed` address would
+    /// permanently brick the market out of its admin-gated entrypoints, so
+    /// the new admin has to actually show up and sign `accept_admin` with
+    /// its own key before the swap takes effect — a bad proposal is
+    /// harmless and reversible (just propose again).
+    pub fn propose_admin(env: Env, current_admin: Address, proposed: Address) -> Result<(), Error> {
+        require_admin(&env, &current_admin)?;
+        env.storage().instance().set(&DataKey::PendingAdmin, &proposed);
+        touch(&env);
+        env.events().publish((symbol_short!("propose"),), proposed.clone());
+        Ok(())
+    }
+
+    /// Step 2: the proposed admin confirms with their own signature. Only
+    /// the exact address `propose_admin` named can call this successfully —
+    /// not the current admin, not anyone else — which is what actually
+    /// proves the new key is live, held, and able to sign before it becomes
+    /// the only key that can pause/unpause.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(Error::NoPendingAdmin)?;
+        if pending != new_admin {
+            return Err(Error::Unauthorized);
+        }
+        new_admin.require_auth();
+        let mut m = load_market(&env)?;
+        m.admin = new_admin.clone();
+        save_market(&env, &m);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        touch(&env);
+        env.events().publish((symbol_short!("newadmin"),), new_admin);
+        Ok(())
+    }
+
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    pub fn get_admin(env: Env) -> Result<Address, Error> {
+        Ok(load_market(&env)?.admin)
     }
 
     /// Lock `amount` collateral, mint `amount` YES + `amount` NO to `user`.

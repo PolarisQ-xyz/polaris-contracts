@@ -135,6 +135,31 @@ fn origin(env: &Env) -> Bytes {
 }
 
 #[test]
+fn init_rejects_non_uncompressed_public_key_prefix() {
+    let env = Env::default();
+    let contract_id = env.register(SmartWallet, ());
+    let client = SmartWalletClient::new(&env, &contract_id);
+
+    let (pk, _payload, _signature) = known_good_vector(&env);
+    let mut bytes = [0u8; 65];
+    for i in 0..65 {
+        bytes[i] = pk.get(i as u32).unwrap();
+    }
+    // Compressed SEC1 prefix (0x02/0x03) and a hybrid one (0x06) are all
+    // 65 bytes long but not uncompressed points.
+    for prefix in [0x02u8, 0x03, 0x06, 0x00] {
+        bytes[0] = prefix;
+        let bad = BytesN::from_array(&env, &bytes);
+        let result = client.try_init(&bad, &origin(&env));
+        assert_eq!(result, Err(Ok(Error::InvalidPublicKey)));
+    }
+
+    // Nothing was stored, so a later valid init still succeeds.
+    client.init(&pk, &origin(&env));
+    assert_eq!(client.get_public_key(), pk);
+}
+
+#[test]
 fn init_then_valid_assertion_passes_check_auth() {
     let env = Env::default();
     let contract_id = env.register(SmartWallet, ());

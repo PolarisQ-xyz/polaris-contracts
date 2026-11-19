@@ -111,6 +111,30 @@ fn deployed_wallet_is_bound_to_the_factorys_pinned_origin() {
 }
 
 #[test]
+fn deploy_with_malformed_key_fails_atomically() {
+    let env = Env::default();
+    let (factory_id, _) = setup(&env);
+    let client = SmartWalletFactoryClient::new(&env, &factory_id);
+
+    let mut bytes = [9u8; 65];
+    bytes[0] = 0x02; // compressed prefix, not an uncompressed SEC1 point
+    let bad_pk = BytesN::from_array(&env, &bytes);
+
+    let result = client.try_deploy(&bad_pk);
+    assert!(result.is_err());
+
+    // The child's `init` rejected the key, so the whole deploy rolled back:
+    // no contract exists at the address `resolve` predicts for that key.
+    let predicted = client.resolve(&bad_pk);
+    let stored_pk: Result<BytesN<65>, _> = env.try_invoke_contract(
+        &predicted,
+        &soroban_sdk::Symbol::new(&env, "get_public_key"),
+        soroban_sdk::vec![&env],
+    );
+    assert!(stored_pk.is_err());
+}
+
+#[test]
 fn same_public_key_cannot_deploy_twice() {
     let env = Env::default();
     let (factory_id, _) = setup(&env);
@@ -163,6 +187,63 @@ fn initialize_requires_the_admins_own_authorization() {
         client.initialize(&admin, &wasm_hash, &test_origin(&env))
     }));
     assert!(result.is_err(), "initialize without the admin's authorization must fail, not succeed");
+}
+
+// ---------- origin validation at initialize() ----------
+
+#[test]
+fn initialize_accepts_well_formed_origins() {
+    let accepted: [&[u8]; 5] = [
+        b"https://polaris-frontend-iota.vercel.app",
+        b"https://polaris.xyz",
+        b"https://localhost:3000",
+        b"http://localhost",
+        b"http://localhost:8080",
+    ];
+    for origin in accepted {
+        let env = Env::default();
+        env.mock_all_auths();
+        let factory_id = env.register(SmartWalletFactory, ());
+        let wasm_hash = env.deployer().upload_contract_wasm(SMART_WALLET_WASM);
+        let admin = Address::generate(&env);
+        let client = SmartWalletFactoryClient::new(&env, &factory_id);
+        let origin = Bytes::from_slice(&env, origin);
+        assert_eq!(
+            client.try_initialize(&admin, &wasm_hash, &origin),
+            Ok(Ok(())),
+            "origin should be accepted"
+        );
+    }
+}
+
+#[test]
+fn initialize_rejects_malformed_origins() {
+    let rejected: [&[u8]; 10] = [
+        b"",
+        b"https://",
+        b"https://polaris.xyz/",
+        b"https://polaris.xyz/app",
+        b"https://polaris.xyz?x=1",
+        b"https://polaris.xyz#frag",
+        b"http://polaris.xyz",
+        b"ftp://polaris.xyz",
+        b"polaris.xyz",
+        b"https://user@polaris.xyz",
+    ];
+    for origin in rejected {
+        let env = Env::default();
+        env.mock_all_auths();
+        let factory_id = env.register(SmartWalletFactory, ());
+        let wasm_hash = env.deployer().upload_contract_wasm(SMART_WALLET_WASM);
+        let admin = Address::generate(&env);
+        let client = SmartWalletFactoryClient::new(&env, &factory_id);
+        let origin = Bytes::from_slice(&env, origin);
+        assert_eq!(
+            client.try_initialize(&admin, &wasm_hash, &origin),
+            Err(Ok(Error::InvalidOrigin)),
+            "origin should be rejected"
+        );
+    }
 }
 
 // ---------- regression: deploy() always uses the pinned wasm, no matter

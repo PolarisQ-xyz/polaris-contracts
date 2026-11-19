@@ -288,6 +288,17 @@ but was rejected by the Soroban host — the frontend's WebAuthn signing code
 has to replicate this normalization (`s' = n - s` when `s > n/2`) on every
 real browser assertion.
 
+### Factory origin format
+
+`initialize(admin, wasm_hash, origin)` pins the relying-party origin every
+wallet this factory deploys will accept signatures from, so it must be a
+bare scheme + authority: `https://host[:port]`, or `http://localhost[:port]`
+for local development. No trailing slash, no path, no query/fragment, no
+userinfo, no whitespace — anything else is rejected with `InvalidOrigin`,
+because a malformed origin would be baked into every wallet the factory
+ever deploys and permanently fail `__check_auth`'s byte-for-byte origin
+comparison.
+
 ### Portable identity
 
 Because a wallet's address is `deploy()`'s deterministic function of
