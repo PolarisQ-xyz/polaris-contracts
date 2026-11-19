@@ -215,6 +215,35 @@ fn double_initialize_rejected() {
     assert_eq!(res, Err(Ok(Error::AlreadyInitialized)));
 }
 
+// ---------- transfer ----------
+
+#[test]
+fn transfer_to_the_contract_itself_rejected() {
+    let h = setup(10_000, true);
+    let alice = Address::generate(&h.env);
+    fund(&h, &alice, 5_000);
+    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
+
+    client.split(&alice, &1_000);
+    let res = client.try_transfer(&alice, &h.market_id, &Prediction::Yes, &400);
+    assert_eq!(res, Err(Ok(Error::InvalidRecipient)));
+    assert_eq!(client.get_position(&alice), (1_000, 1_000));
+    assert_solvent(&h);
+}
+
+#[test]
+fn transfer_to_self_is_a_noop() {
+    let h = setup(10_000, true);
+    let alice = Address::generate(&h.env);
+    fund(&h, &alice, 5_000);
+    let client = PolarisPerpetualClient::new(&h.env, &h.market_id);
+
+    client.split(&alice, &1_000);
+    client.transfer(&alice, &alice, &Prediction::Yes, &400);
+    assert_eq!(client.get_position(&alice), (1_000, 1_000));
+    assert_solvent(&h);
+}
+
 // ---------- split / merge / buy / sell — identical mechanics to polaris-market ----------
 
 #[test]

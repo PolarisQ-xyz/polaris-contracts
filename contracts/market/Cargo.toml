@@ -17,6 +17,10 @@ polaris-ctf-math = { path = "../ctf-math" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+# Random trade-sequence harness for the solvency invariant — see
+# `src/proptest.rs`. Pinned to a major version so CI's case count and
+# shrinking behaviour stay reproducible.
+proptest = "1"
 
 [features]
 testutils = ["soroban-sdk/testutils"]

@@ -333,3 +333,79 @@ fn redeem_from_market_collects_the_vaults_treasury_payout() {
     assert_eq!(payout, 10_000, "the vault gets back exactly the seed liquidity it funded, at par, no trading occurred");
     assert_eq!(vault_client.get_balance(), 10_000);
 }
+
+/// #69 (concrete case of #5): the vault is `treasury` for a market that
+/// settles against it — every trader bought the winning side, so the
+/// vault's own winning-side balance is exactly zero at settlement.
+///
+/// `redeem_from_market` forwards to `market.redeem(vault)`, which pays out
+/// `balance_of(winning_side, vault)` — zero here — and then transfers that
+/// zero amount. The token transfer traps in the VM (a zero-amount
+/// `transfer` is rejected by the SAC), so the whole call panics instead of
+/// returning a typed error. Pinned with `#[should_panic]` today; after #5
+/// this becomes `assert_eq!(result, Err(Ok(Error::NothingToRedeem)))` (or
+/// whichever typed error #5 lands on) and the `#[should_panic]` comes off.
+#[test]
+#[should_panic]
+fn redeem_from_market_traps_when_the_vault_holds_only_losing_shares() {
+    let h = setup();
+    let lp = Address::generate(&h.env);
+    fund(&h, &lp, 1_000_000);
+    let vault_client = VaultClient::new(&h.env, &h.vault_id);
+    vault_client.deposit(&lp, &10_000);
+    vault_client.withdraw(&h.admin, &h.admin, &10_000);
+
+    let lazer_id = h.env.register(MockLazer, ());
+    let reflector_id = h.env.register(mock_reflector::MockReflector, ());
+    let market_id = h.env.register(market_contract::WASM, ());
+    let market_client = MarketClient::new(&h.env, &market_id);
+    let expiry = h.env.ledger().timestamp() + DAY;
+
+    market_client.initialize(
+        &h.admin,
+        &h.token_id,
+        &1_000_000i128, // strike: $10,000.00 in cents
+        &expiry,
+        &3_600u64,
+        &lazer_id,
+        &FEED_ID,
+        &100u32,
+        &20u32,
+        &h.vault_id, // treasury = this vault
+        &10_000i128,
+        &OracleFeedConfig {
+            contract: reflector_id.clone(),
+            asset: market_contract::Asset::Other(soroban_sdk::Symbol::new(&h.env, "XLM")),
+            max_staleness_secs: REFLECTOR_MAX_STALENESS_SECS,
+            tolerance_bps: REFLECTOR_TOLERANCE_BPS,
+        },
+        &None,
+    );
+
+    // A trader buys NO before expiry. `buy` credits the buyer on BOTH sides
+    // and then debits the unwanted side, so the vault's own balances are
+    // untouched by the trade — it never holds a position of its own, only
+    // the pool reserves, which settlement credits to the treasury as YES
+    // and NO shares. Resolving NO makes the vault's NO balance the only
+    // redeemable one, and it is zero: the trader's NO buy drained the NO
+    // reserve to nothing, so settlement credits the treasury 0 NO shares.
+    let trader = Address::generate(&h.env);
+    fund(&h, &trader, 1_000);
+    market_client.buy(&trader, &market_contract::Prediction::No, &1_000i128, &0i128);
+
+    h.env.ledger().set_timestamp(expiry);
+    // Price $5,000 < $10,000 strike -> ResolvedNo. The vault's NO balance
+    // is zero, so `redeem` pays out 0.
+    let payload = build_payload(FEED_ID, 500_000, -2, expiry * 1_000_000);
+    let reflector_client = mock_reflector::MockReflectorClient::new(&h.env, &reflector_id);
+    reflector_client.set_price(&(500_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &expiry);
+    market_client.settle(&Bytes::from_slice(&h.env, &payload));
+
+    let (vault_yes, vault_no) = market_client.get_position(&h.vault_id);
+    assert_eq!(vault_no, 0, "the vault holds no NO shares — the losing side is the only one it could redeem");
+    assert!(vault_yes > 0, "the vault's YES shares are worthless after a NO resolution");
+
+    // Traps today (zero-amount token transfer inside `market.redeem`).
+    // Post-#5: `assert_eq!(result, Err(Ok(Error::NothingToRedeem)))`.
+    vault_client.redeem_from_market(&h.admin, &market_id);
+}

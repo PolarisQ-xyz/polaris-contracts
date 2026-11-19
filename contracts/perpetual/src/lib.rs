@@ -143,6 +143,9 @@ pub enum Error {
     /// `pause()`'s doc comment, identical rationale to `polaris-market`'s
     /// `Error::Paused`.
     Paused = 31,
+    /// `transfer`'s `to` is this contract's own address — shares sent there
+    /// could never be moved out again, so they'd be permanently stranded.
+    InvalidRecipient = 32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -568,6 +571,17 @@ impl PolarisPerpetual {
         load_market(&env)?; // must be initialized
         if amount <= 0 {
             return Err(Error::InvalidAmount);
+        }
+        // Shares sent to the contract itself could never be moved out again
+        // (no entrypoint spends the contract's own share balance), so they'd
+        // be permanently stranded — reject outright.
+        if to == env.current_contract_address() {
+            return Err(Error::InvalidRecipient);
+        }
+        // Self-transfer is a deliberate no-op: it can't change any balance,
+        // so it succeeds without touching storage or emitting an event.
+        if from == to {
+            return Ok(());
         }
         debit(&env, prediction, &from, amount)?;
         credit(&env, prediction, &to, amount);

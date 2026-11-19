@@ -31,6 +31,22 @@
 //! not from any individual depositor's tracked share. A real multi-LP
 //! product would need share accounting before this is safe to open past a
 //! single trusted operator.
+//!
+//! ## Known trap: redeeming a market where the vault holds only losing shares
+//!
+//! `redeem_from_market` forwards to `market.redeem(vault)`, which pays out
+//! the vault's balance on the *winning* side only. When the vault's
+//! winning-side balance is zero — e.g. the market resolved NO and the
+//! vault's NO balance is 0 because a trader's NO buy drained that reserve
+//! before settlement — `redeem` computes a payout of 0 and then transfers
+//! that zero amount, which the token contract rejects, trapping the whole
+//! call in the VM instead of returning a typed error. This is the concrete
+//! vault-side case of #5; the repro is
+//! `redeem_from_market_traps_when_the_vault_holds_only_losing_shares` in
+//! `test.rs`, pinned with `#[should_panic]` until #5 lands a typed error
+//! (at which point the test flips to asserting that error). No funds are
+//! at risk — the vault's losing shares are worth nothing either way — but
+//! the admin gets an opaque trap rather than a clean "nothing to redeem".
 
 use soroban_sdk::{contract, contracterror, contractimpl, symbol_short, token, Address, Env, Symbol};
 
