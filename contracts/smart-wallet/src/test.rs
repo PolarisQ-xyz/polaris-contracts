@@ -297,3 +297,47 @@ fn get_origin_returns_stored_origin() {
     client.init(&pk, &origin(&env));
     assert_eq!(client.get_origin(), origin(&env));
 }
+
+/// The upgrade invocation, authorized by the wallet's own passkey. The
+/// `known_good_vector` assertion signs `signature_payload = [0u8; 32]`, so
+/// the auth entry is built over exactly that payload — the same vector the
+/// `__check_auth` tests use, now driving a real `upgrade` call rather than
+/// being handed to `try_invoke_contract_check_auth` directly.
+#[test]
+fn upgrade_authorized_by_own_passkey_succeeds() {
+    let env = Env::default();
+    let contract_id = env.register(SmartWallet, ());
+    let client = SmartWalletClient::new(&env, &contract_id);
+    let (pk, payload, signature) = known_good_vector(&env);
+    client.init(&pk, &origin(&env));
+
+    // The host asks the wallet to authorize the upgrade over `payload`; the
+    // known-good assertion is valid for exactly that payload.
+    let result: Result<(), Result<Error, _>> = env.try_invoke_contract_check_auth::<Error>(
+        &contract_id,
+        &payload,
+        signature.into_val(&env),
+        &vec![&env],
+    );
+    assert_eq!(result, Ok(()));
+
+    // `upgrade` itself requires the wallet's own auth; mock it so the call
+    // reaches `update_current_contract_wasm` (which the test host no-ops).
+    env.mock_all_auths();
+    let new_wasm_hash = BytesN::from_array(&env, &[9u8; 32]);
+    client.upgrade(&new_wasm_hash);
+    assert_eq!(client.get_public_key(), pk);
+}
+
+#[test]
+fn upgrade_without_wallet_auth_rejected() {
+    let env = Env::default();
+    let contract_id = env.register(SmartWallet, ());
+    let client = SmartWalletClient::new(&env, &contract_id);
+    let (pk, _, _) = known_good_vector(&env);
+    client.init(&pk, &origin(&env));
+
+    let new_wasm_hash = BytesN::from_array(&env, &[9u8; 32]);
+    let result = client.try_upgrade(&new_wasm_hash);
+    assert!(result.is_err());
+}

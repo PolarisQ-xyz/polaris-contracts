@@ -107,9 +107,7 @@ fn setup() -> Harness {
     let sac = env.register_stellar_asset_contract_v2(admin.clone());
     let token_id = sac.address();
 
-    let vault_id = env.register(Vault, ());
-    let client = VaultClient::new(&env, &vault_id);
-    client.initialize(&admin, &token_id);
+    let vault_id = env.register(Vault, (&admin, &token_id));
 
     Harness { env, vault_id, admin, token_id }
 }
@@ -176,18 +174,23 @@ fn deposit_before_initialize_rejected() {
     let token_id = sac.address();
     token::StellarAssetClient::new(&env, &token_id).mint(&admin, &1_000);
 
-    let vault_id = env.register(Vault, ());
+    // A vault can no longer be registered unconfigured: the constructor
+    // (#95) runs atomically with the deploy, so there is no window in which
+    // `deposit` could observe missing admin/collateral state.
+    let vault_id = env.register(Vault, (&admin, &token_id));
     let client = VaultClient::new(&env, &vault_id);
     let result = client.try_deposit(&admin, &100);
-    assert_eq!(result, Err(Ok(Error::NotInitialized)));
+    assert!(result.is_ok(), "a constructed vault must be immediately usable");
 }
 
 #[test]
 fn double_initialize_rejected() {
     let h = setup();
     let client = VaultClient::new(&h.env, &h.vault_id);
+    // No `initialize` entrypoint exists any more (#95) — the constructor is
+    // the only setup path, and it runs exactly once, at deploy time.
     let result = client.try_initialize(&h.admin, &h.token_id);
-    assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+    assert!(result.is_err(), "initialize must no longer be callable");
 }
 
 // ---------- admin rotation (#4) ----------

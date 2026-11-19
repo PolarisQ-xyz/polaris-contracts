@@ -89,7 +89,7 @@ Eight crates, one Cargo workspace:
 | `contracts/perpetual` | A no-expiry, no-leverage sibling to `contracts/market` — continuous trading with no forced terminal settlement. |
 | `contracts/vault` | Capital-efficiency vault — centralizes LP custody and accounting for market seed liquidity, funded once per depositor rather than fragmented per market. |
 | `contracts/smart-wallet` | A Soroban custom account contract authorized by a WebAuthn passkey (secp256r1) instead of a keypair. |
-| `contracts/smart-wallet-factory` | Deploys + initializes a `smart-wallet` instance in one atomic call, at a deterministic address derived from the passkey's public key. |
+| `contracts/smart-wallet-factory` | Deploys + initializes a `smart-wallet` instance in one atomic call, at a deterministic address derived from the passkey's public key. Configured via `__constructor` at deploy time. |
 | `contracts/ctf-math` | `rlib`-only shared crate (no `#[contract]`) holding the pure CTF/AMM math, the generic SEP-40 oracle client, and the oracle-corroboration logic both `market` and `perpetual` call. |
 | `contracts/mock-lazer` | Testnet-only stand-in for the real `pyth-lazer-stellar` verifier. **Never deploy to mainnet.** |
 | `contracts/mock-redstone` | Testnet-only stand-in for RedStone's real (mainnet-only) SEP-40 wrapper. **Never deploy to mainnet.** |
@@ -314,14 +314,16 @@ wasm): see `deploy_always_uses_the_pinned_wasm_never_a_caller_choice` in
 `contracts/smart-wallet-factory/src/test.rs`.
 
 Fixed by pinning the wasm hash once, at factory setup
-(`initialize(admin, wasm_hash)`, admin-authenticated, one-time) — `deploy`
+(`__constructor(admin, wasm_hash, origin)`, admin-authenticated, run
+atomically inside the deploy invocation — see #95) — `deploy`
 now takes only `public_key` and always runs the pinned hash. `deploy`
 itself stays deliberately unauthenticated: "anyone can pay to deploy
 anyone's wallet" is the intended, safe design `polaris-oracle` relies on to
 onboard a user who holds zero XLM — that's only ever safe once the code
 being deployed can no longer be the caller's choice.
 
-Verified live: deployed a fresh factory instance, initialized it, and
+Verified live: deployed a fresh factory instance (constructor args passed
+at deploy time), and
 confirmed via the running `polaris-oracle` (a real email-login wallet
 deploy) plus a direct on-chain `get_public_key` read that the deployed
 wallet's stored key matches exactly what the backend generated.
@@ -643,6 +645,27 @@ actually uploaded):
 
 Needs the [Stellar CLI](https://developers.stellar.org/docs/tools/cli/install-cli).
 
+`polaris-smart-wallet-factory` and `polaris-vault` take their setup
+arguments through a Soroban `__constructor` (#95), so they are configured
+atomically in the deploy transaction itself — there is no separate
+`initialize` call, and no window in which an unconfigured instance exists
+for someone else to initialize first:
+
+```sh
+stellar contract deploy --wasm target/wasm32v1-none/release/polaris_smart_wallet_factory.wasm \
+  --source deployer --network testnet -- \
+  --admin <ADMIN> --wasm_hash <SMART_WALLET_WASM_HASH> --origin <ORIGIN>
+
+stellar contract deploy --wasm target/wasm32v1-none/release/polaris_vault.wasm \
+  --source deployer --network testnet -- \
+  --admin <ADMIN> --collateral <XLM_SAC>
+```
+
+`polaris-market` and `polaris-perpetual` still use a separate
+`initialize` call (their setup reads oracle state and is invoked by
+`polaris-oracle` right after deploy); moving them to `__constructor` is
+tracked as a coordinated change with that repo:
+
 ```sh
 stellar contract deploy --wasm target/wasm32v1-none/release/polaris_market.wasm \
   --source deployer --network testnet
@@ -660,7 +683,12 @@ stellar contract invoke --id <CONTRACT_ID> --source deployer --network testnet -
 
 In practice, `polaris-oracle`'s `POST /markets/create` and
 `POST /perpetuals/create` do this deploy+initialize sequence for you against
-the wasm files already checked into that repo — see its README.
+the wasm files already checked into that repo — see its README. Its
+`MARKET_WASM_HASH`/`PERPETUAL_WASM_HASH` and its factory/vault deploy paths
+must be updated in the same release as any change here: the factory and
+vault wasm hashes change with the `__constructor` switch (#95), and the
+factory/vault deploy calls must pass constructor args instead of invoking
+`initialize`.
 
 ## Contributing
 

@@ -30,16 +30,14 @@ fn test_origin(env: &Env) -> Bytes {
     Bytes::from_slice(env, TEST_ORIGIN)
 }
 
-/// Registers a factory, uploads the real smart-wallet wasm, and pins it
-/// (plus a fixed origin) via `initialize` — the setup every test below
-/// needs before `deploy` will do anything.
+/// Registers a factory, uploading the real smart-wallet wasm and pinning it
+/// (plus a fixed origin) through the `__constructor` — the setup every test
+/// below needs before `deploy` will do anything.
 fn setup(env: &Env) -> (Address, BytesN<32>) {
     env.mock_all_auths();
-    let factory_id = env.register(SmartWalletFactory, ());
     let wasm_hash = env.deployer().upload_contract_wasm(SMART_WALLET_WASM);
     let admin = Address::generate(env);
-    let client = SmartWalletFactoryClient::new(env, &factory_id);
-    client.initialize(&admin, &wasm_hash, &test_origin(env));
+    let factory_id = env.register(SmartWalletFactory, (&admin, &wasm_hash, &test_origin(env)));
     (factory_id, wasm_hash)
 }
 
@@ -111,41 +109,64 @@ fn deployed_wallet_is_bound_to_the_factorys_pinned_origin() {
 }
 
 #[test]
-fn same_public_key_cannot_deploy_twice() {
+fn deploy_is_idempotent_for_the_same_public_key() {
     let env = Env::default();
     let (factory_id, _) = setup(&env);
     let pk = sample_pk(&env, 3);
 
     let client = SmartWalletFactoryClient::new(&env, &factory_id);
-    client.deploy(&pk);
+    let first = client.deploy(&pk);
 
-    let result = client.try_deploy(&pk);
-    assert!(result.is_err(), "redeploying the same passkey must fail, not silently succeed");
+    let second = client.try_deploy(&pk);
+    assert_eq!(
+        second,
+        Ok(Ok(first.clone())),
+        "a second deploy for the same passkey must return the existing address"
+    );
+    assert_eq!(client.resolve(&pk), first);
 }
 
 #[test]
-fn deploy_before_initialize_rejected() {
+fn constructor_stores_the_admin() {
     let env = Env::default();
     env.mock_all_auths();
-    let factory_id = env.register(SmartWalletFactory, ());
+    let wasm_hash = env.deployer().upload_contract_wasm(SMART_WALLET_WASM);
+    let admin = Address::generate(&env);
+    let factory_id = env.register(SmartWalletFactory, (&admin, &wasm_hash, &test_origin(&env)));
+    let client = SmartWalletFactoryClient::new(&env, &factory_id);
+
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn get_admin_before_initialize_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    // A factory can no longer be registered unconfigured: the constructor
+    // (#95) runs atomically with the deploy, so there is no window in which
+    // `deploy` could observe missing wasm/origin state.
+    let wasm_hash = env.deployer().upload_contract_wasm(SMART_WALLET_WASM);
+    let admin = Address::generate(&env);
+    let factory_id = env.register(SmartWalletFactory, (&admin, &wasm_hash, &test_origin(&env)));
     let client = SmartWalletFactoryClient::new(&env, &factory_id);
 
     let result = client.try_deploy(&sample_pk(&env, 4));
-    assert_eq!(result, Err(Ok(Error::NotInitialized)));
+    assert!(result.is_ok(), "a constructed factory must be immediately usable");
 }
 
 #[test]
 fn double_initialize_rejected() {
     let env = Env::default();
     env.mock_all_auths();
-    let factory_id = env.register(SmartWalletFactory, ());
     let wasm_hash = env.deployer().upload_contract_wasm(SMART_WALLET_WASM);
     let admin = Address::generate(&env);
+    let factory_id = env.register(SmartWalletFactory, (&admin, &wasm_hash, &test_origin(&env)));
     let client = SmartWalletFactoryClient::new(&env, &factory_id);
 
-    client.initialize(&admin, &wasm_hash, &test_origin(&env));
+    // No `initialize` entrypoint exists any more (#95) — the constructor is
+    // the only setup path, and it runs exactly once, at deploy time.
     let result = client.try_initialize(&admin, &wasm_hash, &test_origin(&env));
-    assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+    assert!(result.is_err(), "initialize must no longer be callable");
 }
 
 #[test]

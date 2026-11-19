@@ -20,9 +20,10 @@
 //! deploying anything — a caller (this system's own backend, or any third
 //! party embedding a market) can check whether a wallet already exists for
 //! a given passkey before prompting a "create wallet" flow. `deploy` itself
-//! is also naturally idempotent: a second call for the same key fails on
-//! the child's own `AlreadyInitialized` check rather than silently
-//! creating (or, worse, silently reusing) a duplicate.
+//! is idempotent: if a wallet already exists at that key's address, it
+//! probes the existing contract (via `get_public_key`) and returns that
+//! address unchanged instead of trapping in `deploy_v2` — so a second call
+//! for the same key is a safe no-op, never a duplicate or a hijack.
 //!
 //! Deliberately *not* reimplemented off-chain (in the backend or frontend):
 //! Soroban's exact deployer-address-plus-salt hash isn't something worth
@@ -48,7 +49,8 @@
 //! wasm_and_hijack_a_victims_address` in `test.rs` for the reproduction.
 //!
 //! Fixed by pinning the wasm hash once, at factory setup
-//! (`initialize(admin, wasm_hash)`, admin-authenticated, one-time), and
+//! (`__constructor(admin, wasm_hash, origin)`, admin-authenticated, runs
+//! atomically with the deploy — see #95), and
 //! having `deploy` always use that stored hash. `deploy` itself stays
 //! deliberately unauthenticated — "anyone can pay to deploy anyone's
 //! wallet" is the intended, safe design the backend already relies on to
@@ -60,7 +62,8 @@ use soroban_sdk::{contract, contracterror, contractimpl, symbol_short, vec, Addr
 
 const STORAGE_KEY_WASM_HASH: Symbol = symbol_short!("wasm");
 const STORAGE_KEY_ORIGIN: Symbol = symbol_short!("origin");
-/// Same bump window used across this workspace — see #11. `initialize`
+const STORAGE_KEY_ADMIN: Symbol = symbol_short!("admin");
+/// Same bump window used across this workspace — see #11. The constructor
 /// only ever runs once per factory instance, so without this the
 /// factory's own storage TTL has nothing else to keep it alive between
 /// then and whenever `deploy` is next called — which, on a low-traffic
@@ -76,6 +79,8 @@ fn touch(env: &Env) {
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u32)]
 pub enum Error {
+    /// Retained for ABI stability; the constructor (#95) can no longer
+    /// report it — a second deploy at the same address fails in the host.
     AlreadyInitialized = 1,
     NotInitialized = 2,
 }
@@ -99,16 +104,31 @@ impl SmartWalletFactory {
     ///
     /// `admin` is whoever controls this factory's configuration — not a
     /// role any deployed wallet answers to, just the authority to set this
-    /// once. Must run before `deploy` will do anything.
-    pub fn initialize(env: Env, admin: Address, wasm_hash: BytesN<32>, origin: Bytes) -> Result<(), Error> {
+    /// once. It is authenticated here and then stored, so the factory keeps
+    /// a lasting, readable record of that authority (`get_admin`) instead of
+    /// discarding it after the auth check (#96).
+    ///
+    /// A `__constructor` (#95), not a separate `initialize` entrypoint:
+    /// `deploy` + `initialize` as two transactions left a window where the
+    /// factory existed unconfigured, and anyone could race the legitimate
+    /// setup. The constructor runs atomically inside the deploy invocation,
+    /// so the factory is never observable in an unconfigured state.
+    pub fn __constructor(env: Env, admin: Address, wasm_hash: BytesN<32>, origin: Bytes) {
         admin.require_auth();
-        if env.storage().instance().has(&STORAGE_KEY_WASM_HASH) {
-            return Err(Error::AlreadyInitialized);
-        }
         env.storage().instance().set(&STORAGE_KEY_WASM_HASH, &wasm_hash);
         env.storage().instance().set(&STORAGE_KEY_ORIGIN, &origin);
+        env.storage().instance().set(&STORAGE_KEY_ADMIN, &admin);
         touch(&env);
-        Ok(())
+    }
+
+    /// The admin this factory was constructed with — the authority that
+    /// pinned the wasm hash and origin. A pure read, safe to call
+    /// speculatively.
+    pub fn get_admin(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&STORAGE_KEY_ADMIN)
+            .ok_or(Error::NotInitialized)
     }
 
     /// Deploys (and atomically initializes) a smart-wallet for
@@ -117,6 +137,13 @@ impl SmartWalletFactory {
     /// why neither is a parameter here. Deliberately unauthenticated:
     /// anyone can pay to deploy anyone's wallet, which is what lets this
     /// system's backend onboard a user who holds zero XLM.
+    ///
+    /// Idempotent: if a contract already lives at `public_key`'s
+    /// deterministic address, this returns that address without deploying
+    /// or re-initializing anything. The probe is a `get_public_key` call on
+    /// the existing contract, so an address occupied by something that
+    /// isn't an initialized smart wallet still traps rather than being
+    /// silently handed back.
     pub fn deploy(env: Env, public_key: BytesN<65>) -> Result<Address, Error> {
         let wasm_hash: BytesN<32> = env
             .storage()
@@ -129,6 +156,18 @@ impl SmartWalletFactory {
             .get(&STORAGE_KEY_ORIGIN)
             .ok_or(Error::NotInitialized)?;
         let salt = env.crypto().sha256(&public_key.clone().into());
+        let address = env
+            .deployer()
+            .with_current_contract(salt.clone())
+            .deployed_address();
+        let existing: Result<Result<BytesN<65>, _>, _> =
+            env.try_invoke_contract(&address, &symbol_short!("get_pk"), vec![&env]);
+        if let Ok(Ok(existing_pk)) = existing {
+            if existing_pk == public_key {
+                touch(&env);
+                return Ok(address);
+            }
+        }
         let address = env
             .deployer()
             .with_current_contract(salt)

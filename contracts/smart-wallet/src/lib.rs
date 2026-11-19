@@ -147,6 +147,28 @@ impl SmartWallet {
             .get(&STORAGE_KEY_ORIGIN)
             .ok_or(Error::NotInitialized)
     }
+
+    /// Replace this wallet's code with `new_wasm_hash` (already uploaded to
+    /// the ledger). The only way a `__check_auth` bug in a deployed wallet
+    /// can ever be patched — without it, a wallet whose verification logic
+    /// is broken is permanently unusable, since its address is fixed by the
+    /// passkey's public key and nothing else can sign for it.
+    ///
+    /// Authorized by the wallet's *own* address (`require_auth()`), i.e. by
+    /// the passkey itself: the host routes that auth entry back through
+    /// `__check_auth`, so an upgrade is exactly as hard to authorize as any
+    /// other transaction this wallet signs. There is deliberately no admin
+    /// key and no allowlist — a factory-held upgrade key would be a single
+    /// point of compromise over every wallet it ever deployed, strictly
+    /// worse than the bug this entrypoint exists to fix.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        let address = env.current_contract_address();
+        address.require_auth();
+        touch(&env);
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
 }
 
 /// The WebAuthn assertion, passed by the caller as this account's

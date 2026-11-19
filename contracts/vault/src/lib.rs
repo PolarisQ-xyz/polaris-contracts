@@ -4,7 +4,7 @@
 //!
 //! Additive, isolated, zero changes to `contracts/market`. What this
 //! actually fixes: today, every new market's `initial_liquidity` is wired
-//! from the admin's own keypair by hand at `initialize()` time, and that
+//! from the admin's own keypair by hand at construction time, and that
 //! seed capital sits siloed in that one market's own reserves for its
 //! entire life — recovered only at settlement, into a bare `treasury`
 //! wallet address with no accounting at all. Fragmented capital, manual
@@ -40,7 +40,7 @@ use soroban_sdk::{contract, contracterror, contractimpl, symbol_short, token, Ad
 /// pulls its `#[contract]`-exported wasm symbols into *this* contract's own
 /// compiled output — confirmed the hard way: `cargo build --release
 /// --target wasm32v1-none` linked "successfully" but warned `function
-/// signature mismatch: initialize`, because both contracts export a
+/// signature mismatch: __constructor`, because both contracts export a
 /// same-named function and the linker was merging them into one binary.
 /// `contractimport!` reads the target wasm's embedded interface spec at
 /// compile time (the same spec `polaris-oracle`'s `contract.Spec.fromWasm`
@@ -82,6 +82,8 @@ const STORAGE_KEY_PENDING_ADMIN: Symbol = symbol_short!("pending");
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u32)]
 pub enum Error {
+    /// Retained for ABI stability; the constructor (#95) can no longer
+    /// report it — a second deploy at the same address fails in the host.
     AlreadyInitialized = 1,
     NotInitialized = 2,
     InvalidAmount = 3,
@@ -101,16 +103,18 @@ impl Vault {
     /// `contracts/market` — see its "Why native XLM" section) — fixed once,
     /// not re-specified per call, so a `deposit`/`withdraw` can never be
     /// pointed at the wrong asset by mistake.
-    pub fn initialize(env: Env, admin: Address, collateral: Address) -> Result<(), Error> {
+    ///
+    /// A `__constructor` (#95), not a separate `initialize` entrypoint:
+    /// deploy + initialize as two transactions left a window where the
+    /// vault existed with no admin and no collateral, and anyone could race
+    /// the legitimate setup. The constructor runs atomically inside the
+    /// deploy invocation, so the vault is never observable unconfigured.
+    pub fn __constructor(env: Env, admin: Address, collateral: Address) {
         admin.require_auth();
-        if env.storage().instance().has(&STORAGE_KEY_ADMIN) {
-            return Err(Error::AlreadyInitialized);
-        }
         env.storage().instance().set(&STORAGE_KEY_ADMIN, &admin);
         env.storage().instance().set(&STORAGE_KEY_COLLATERAL, &collateral);
         env.storage().instance().set(&STORAGE_KEY_TOTAL_DEPOSITED, &0i128);
         touch(&env);
-        Ok(())
     }
 
     /// LP capital in. Anyone can deposit (permissionless funding, same
@@ -136,7 +140,7 @@ impl Vault {
     /// Admin-gated capital out — funds a new market's seed liquidity, or an
     /// LP redemption. Fails closed the same way every other admin-gated
     /// entrypoint in this system does (`AdminGuard`, `AuthRelayService`,
-    /// the wallet factory's `initialize`): wrong signer, no transfer. If
+    /// the wallet factory's constructor): wrong signer, no transfer. If
     /// `amount` exceeds what's actually here, the token transfer itself
     /// fails the whole call — no separate balance check needed, same as
     /// every other transfer in this system.
