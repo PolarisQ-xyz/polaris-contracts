@@ -30,13 +30,19 @@ sections for what that looks like in practice, and each issue's own
 references before starting; it usually explains *why* the current
 behavior is wrong, which matters more than the literal diff.
 
-Before contributing, build the workspace and run the tests (see the
-README's ["Building & testing"](./README.md#building--testing) section):
+Before contributing, build the workspace and run the tests with
+[`just`](https://github.com/casey/just) (see the README's ["Building &
+testing"](./README.md#building--testing) section):
 
 ```sh
-cargo test --workspace
-cargo build --release --target wasm32v1-none -p polaris-market
+just test
 ```
+
+`just test` builds the wasm in the required order (polaris-market first —
+`contractimport!` reads it as a file) and then runs `cargo test --workspace`.
+Don't call `cargo test` directly on a fresh clone: it fails without that
+build order. `just build-wasm`, `just hashes` and `just ci` are the other
+targets; CI runs the same ones.
 
 ## Communication
 

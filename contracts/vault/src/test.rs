@@ -2,13 +2,47 @@
 extern crate std;
 
 use super::*;
-use market_contract::Client as MarketClient;
-use market_contract::OracleFeedConfig;
 use polaris_mock_lazer::MockLazer;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token, Bytes, Env,
 };
+
+/// `polaris-market`'s callable surface as this test needs it — the same
+/// hand-declared-client approach `lib.rs`'s `MarketContract` trait uses for
+/// `redeem`, extended here with the two entrypoints the integration test
+/// drives (`initialize`, `settle`). No `contractimport!`, so no compiled
+/// wasm is needed at *compile* time; the test still deploys a real market
+/// from its release wasm below, which is what actually exercises the
+/// cross-contract call.
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "MarketClient")]
+trait MarketTestContract {
+    fn initialize(
+        env: Env,
+        admin: Address,
+        collateral: Address,
+        strike_price: i128,
+        expiry: u64,
+        grace_period: u64,
+        lazer_contract: Address,
+        feed_id: u32,
+        base_fee_bps: u32,
+        min_fee_bps: u32,
+        treasury: Address,
+        initial_liquidity: i128,
+        reflector: OracleFeedConfig,
+        redstone: Option<OracleFeedConfig>,
+    ) -> Result<(), u32>;
+    fn settle(env: Env, payload: Bytes) -> Result<(), u32>;
+}
+
+/// Real compiled market wasm, built by
+/// `cargo build --release --target wasm32v1-none -p polaris-market` — a
+/// test-only build-order dependency (CI builds it first), not a compile-time
+/// one: nothing in this crate's own source reads it.
+const MARKET_WASM: &[u8] =
+    include_bytes!("../../../target/wasm32v1-none/release/polaris_market.wasm");
 
 const FEED_ID: u32 = 100;
 const DAY: u64 = 86_400;
@@ -20,27 +54,15 @@ const REFLECTOR_TOLERANCE_BPS: u32 = 150;
 /// Duplicated from `contracts/market/src/test.rs`'s own `mod mock_reflector`
 /// — same "exact copy, nothing vault-specific" precedent already set by
 /// `build_payload` below. This crate has no source dependency on
-/// `polaris-market` (only a compiled-wasm import via `contractimport!`, see
-/// the module doc on `market_contract` in `lib.rs`), so it can't share the
-/// Rust type declaration directly; the wasm's own internal code is what
-/// actually constructs `Asset`/`PriceData` when it calls `lastprice`, so
-/// this only needs matching XDR shape (variant/field order), not identity.
+/// `polaris-market` (only a hand-declared client trait, see the module doc
+/// on `MarketContract` in `lib.rs`), so it can't share the Rust type
+/// declaration directly; the wasm's own internal code is what actually
+/// constructs `Asset`/`PriceData` when it calls `lastprice`, so this only
+/// needs matching XDR shape (variant/field order), not identity.
 mod mock_reflector {
     use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
 
-    #[contracttype(export = false)]
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    pub enum Asset {
-        Stellar(Address),
-        Other(Symbol),
-    }
-
-    #[contracttype(export = false)]
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    pub struct PriceData {
-        pub price: i128,
-        pub timestamp: u64,
-    }
+    use polaris_ctf_math::sep40::{Asset, PriceData};
 
     const PRICE_KEY: Symbol = symbol_short!("px");
 
@@ -296,7 +318,7 @@ fn redeem_from_market_collects_the_vaults_treasury_payout() {
 
     let lazer_id = h.env.register(MockLazer, ());
     let reflector_id = h.env.register(mock_reflector::MockReflector, ());
-    let market_id = h.env.register(market_contract::WASM, ());
+    let market_id = h.env.register(MARKET_WASM, ());
     let market_client = MarketClient::new(&h.env, &market_id);
     let expiry = h.env.ledger().timestamp() + DAY;
 
@@ -314,12 +336,12 @@ fn redeem_from_market_collects_the_vaults_treasury_payout() {
         &10_000i128,
         &OracleFeedConfig {
             contract: reflector_id.clone(),
-            asset: market_contract::Asset::Other(soroban_sdk::Symbol::new(&h.env, "XLM")),
+            asset: polaris_ctf_math::sep40::Asset::Other(soroban_sdk::Symbol::new(&h.env, "XLM")),
             max_staleness_secs: REFLECTOR_MAX_STALENESS_SECS,
             tolerance_bps: REFLECTOR_TOLERANCE_BPS,
         },
         &None, // no RedStone leg — this test exercises testnet-shaped behavior
-    );
+    ).unwrap();
 
     // No trading — the simplest case: the market's entire pool (all of the
     // vault's seed liquidity) is what the vault should get back.
@@ -327,7 +349,7 @@ fn redeem_from_market_collects_the_vaults_treasury_payout() {
     let payload = build_payload(FEED_ID, 2_000_000, -2, expiry * 1_000_000); // price $20,000 >= $10,000 strike -> ResolvedYes
     let reflector_client = mock_reflector::MockReflectorClient::new(&h.env, &reflector_id);
     reflector_client.set_price(&(2_000_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &expiry); // agrees with Lazer's $20,000
-    market_client.settle(&Bytes::from_slice(&h.env, &payload));
+    market_client.settle(&Bytes::from_slice(&h.env, &payload)).unwrap();
 
     let payout = vault_client.redeem_from_market(&h.admin, &market_id);
     assert_eq!(payout, 10_000, "the vault gets back exactly the seed liquidity it funded, at par, no trading occurred");

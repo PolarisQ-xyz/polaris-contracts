@@ -13,7 +13,9 @@ soroban-sdk = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 # polaris-market itself is NOT a dependency anywhere (see lib.rs's
-# `market_contract` module doc for why) — its wasm is imported directly via
-# `contractimport!`, which also supplies `market_contract::WASM` for tests
-# to deploy a real market against, same file, one source of truth.
+# `MarketContract` trait doc for why) — its callable surface is hand-declared
+# as a `#[contractclient]` trait, so no compiled wasm is needed to build or
+# test this crate. Tests still deploy a real market from its release wasm
+# (`include_bytes!` in test.rs), which is a test-only, CI-ordered concern.
+polaris-ctf-math = { path = "../ctf-math" }
 polaris-mock-lazer = { path = "../mock-lazer" }

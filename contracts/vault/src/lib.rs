@@ -34,28 +34,29 @@
 
 use soroban_sdk::{contract, contracterror, contractimpl, symbol_short, token, Address, Env, Symbol};
 
-/// Imports `polaris-market`'s client from its *compiled wasm's own spec* —
-/// deliberately not a source dependency on the `polaris-market` crate.
-/// Depending on that crate directly (for its generated `PolarisMarketClient`)
-/// pulls its `#[contract]`-exported wasm symbols into *this* contract's own
-/// compiled output — confirmed the hard way: `cargo build --release
-/// --target wasm32v1-none` linked "successfully" but warned `function
-/// signature mismatch: initialize`, because both contracts export a
-/// same-named function and the linker was merging them into one binary.
-/// `contractimport!` reads the target wasm's embedded interface spec at
-/// compile time (the same spec `polaris-oracle`'s `contract.Spec.fromWasm`
-/// reads at runtime) to generate a byte-correct client — including the
-/// right `Result<T, Error>` unwrapping for `redeem` — without linking in
-/// any of that wasm's actual executable code. Path is relative to this
-/// crate's own directory (`contracts/vault/`), confirmed empirically —
-/// the SDK's own doc comment on `contractimport!` claims "relative to the
-/// workspace root," which did not hold for this soroban-sdk version.
-/// Requires `polaris-market`'s release wasm already built (`cargo build
-/// --release --target wasm32v1-none -p polaris-market`), same build-order
-/// dependency the top-level README already documents for wiring the
-/// compiled wasm into `polaris-oracle`.
-mod market_contract {
-    soroban_sdk::contractimport!(file = "../../target/wasm32v1-none/release/polaris_market.wasm");
+use polaris_ctf_math::OracleFeedConfig;
+
+/// `polaris-market`'s callable surface, hand-declared rather than imported
+/// from its compiled wasm. Deliberately not a source dependency on the
+/// `polaris-market` crate: depending on it directly (for its generated
+/// `PolarisMarketClient`) pulls its `#[contract]`-exported wasm symbols into
+/// *this* contract's own compiled output — confirmed the hard way: `cargo
+/// build --release --target wasm32v1-none` linked "successfully" but warned
+/// `function signature mismatch: initialize`, because both contracts export
+/// a same-named function and the linker was merging them into one binary.
+/// This used to be a `contractimport!` of the market's release wasm, which
+/// worked but made `cargo test -p polaris-vault` depend on a prior
+/// `cargo build -p polaris-market` — a build-order dependency invisible to
+/// Cargo's own graph. A hand-declared `#[contractclient]` trait generates
+/// the same byte-correct client (Soroban's wire encoding is structural, not
+/// identity-based) with no wasm file involved at all. Only the entrypoints
+/// this vault actually calls are declared; `try_redeem` is the generated
+/// `Result`-returning variant, so a market-side error surfaces as `Err`
+/// instead of trapping.
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "MarketClient")]
+pub trait MarketContract {
+    fn redeem(env: Env, user: Address) -> Result<i128, u32>;
 }
 
 /// Same TTL bump market/perpetual already use (~31 days at 5s/ledger) —
@@ -89,6 +90,10 @@ pub enum Error {
     /// `accept_admin` called with no `propose_admin` ever having been
     /// called (or one already consumed by a prior `accept_admin`).
     NoPendingAdmin = 5,
+    /// The market's `redeem` returned an error (e.g. `NothingToRedeem`, or
+    /// the market was never settled). Surfaced as a typed vault error rather
+    /// than a trap, since the client call is `try_redeem`.
+    MarketRedeemFailed = 6,
 }
 
 #[contract]
@@ -161,8 +166,8 @@ impl Vault {
     /// from that address's own on-chain share balance.
     pub fn redeem_from_market(env: Env, admin: Address, market_id: Address) -> Result<i128, Error> {
         Self::require_admin(&env, &admin)?;
-        let market = market_contract::Client::new(&env, &market_id);
-        let payout = market.redeem(&env.current_contract_address());
+        let market = MarketClient::new(&env, &market_id);
+        let payout = market.try_redeem(&env.current_contract_address()).map_err(|_| Error::MarketRedeemFailed)?;
         touch(&env);
         env.events().publish((symbol_short!("mkt_rdm"), market_id), payout);
         Ok(payout)

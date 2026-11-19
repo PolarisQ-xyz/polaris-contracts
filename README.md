@@ -599,20 +599,38 @@ live.
 
 ## Building & testing
 
-```sh
-# unit tests (native target; 100 across the whole workspace)
-cargo test --workspace
+Build and test with [`just`](https://github.com/casey/just) — the recipes
+encode the required build order once, and CI runs the same targets:
 
-# release WASM (requires `rustup target add wasm32v1-none`)
-# polaris-market first, on its own — polaris-vault's contractimport! reads
-# its compiled wasm as a file at build time, a dependency Cargo's own
-# graph doesn't know about (see "The capital-efficiency vault" above).
-cargo build --release --target wasm32v1-none -p polaris-market
-cargo build --release --target wasm32v1-none -p polaris-mock-lazer \
-  -p polaris-mock-redstone -p polaris-smart-wallet -p polaris-smart-wallet-factory \
-  -p polaris-vault -p polaris-perpetual
-shasum -a 256 target/wasm32v1-none/release/*.wasm
+```sh
+just test        # build the wasm in order, then `cargo test --workspace`
+just build-wasm  # release WASM only (requires `rustup target add wasm32v1-none`)
+just hashes      # sha256 of the release WASM artifacts
+just ci          # everything CI runs: test, diagnostic build, hashes
 ```
+
+The order matters: `polaris-market` is built first, on its own, because
+`polaris-vault`'s `contractimport!` reads its compiled wasm as a file at
+build time — a dependency Cargo's own graph doesn't know about (see "The
+capital-efficiency vault" above). That's why `cargo test --workspace` alone
+fails on a fresh clone; use `just test`.
+
+### Diagnostic builds (`release-with-logs`)
+
+`Cargo.toml` also defines a `release-with-logs` profile: it inherits
+`release` but turns on `debug-assertions`, so contract panics and
+`assert!`/`debug_assert!` failures carry their messages instead of being
+stripped. Use it **only for diagnostic testnet deploys — never for mainnet**:
+the extra checks cost CPU instructions and the artifacts are not the ones
+whose hashes are recorded above.
+
+```sh
+# diagnostic WASM for testnet debugging (same ordering rule as above)
+just build-wasm-logs
+# artifacts land in target/wasm32v1-none/release-with-logs/
+```
+
+CI builds this profile on every push/PR so it cannot silently break.
 
 | Crate | Unit tests |
 |---|---|

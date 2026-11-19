@@ -5,56 +5,50 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    name: cargo test --workspace
+    name: just test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@fa3d70b0b1f0b0e0e0b0e0e0b0e0e0b0e0e0b0e0 # stable
         with:
           targets: wasm32v1-none
-      - uses: Swatinem/rust-cache@v2
-      - name: Build polaris-market's wasm first
-        # contracts/vault AND contracts/smart-wallet-factory both read
-        # sibling contracts' compiled wasm as *files* at macro-expansion
-        # time via `contractimport!`, even for a native `cargo test` build —
-        # a dependency invisible to Cargo's own build graph (see the
-        # identical steps in the wasm-build job below, and
-        # contracts/vault/src/lib.rs, for why). A fresh CI runner has never
-        # built anything, so `cargo test --workspace` fails outright without
-        # this — confirmed live: this exact gap was in production, broken,
-        # since the vault was first added, because every local run had
-        # already built the wasm manually first and never hit it.
-        run: cargo build --release --target wasm32v1-none -p polaris-market
-      - name: Build the rest
-        run: |
-          cargo build --release --target wasm32v1-none \
-            -p polaris-mock-lazer -p polaris-mock-redstone -p polaris-smart-wallet \
-            -p polaris-smart-wallet-factory -p polaris-vault -p polaris-perpetual
-      - run: cargo test --workspace
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2.0.0
+      # `just test` builds polaris-market's wasm first, then the rest, then
+      # runs the workspace tests — the `contractimport!` build order lives in
+      # the justfile, not here (see contracts/vault/src/lib.rs for why).
+      - run: just test
 
   wasm-build:
     name: release WASM builds
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@fa3d70b0b1f0b0e0e0b0e0e0b0e0e0b0e0e0b0e0 # stable
+        with:
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
+      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2.0.0
+      # Build order (polaris-market first) is encoded in the justfile.
+      - run: just build-wasm
+
+  wasm-build-with-logs:
+    name: release-with-logs WASM builds
+    runs-on: ubuntu-latest
+    steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32v1-none
       - uses: Swatinem/rust-cache@v2
-      - name: Build polaris-market first
-        # polaris-vault's `contractimport!` reads polaris-market's compiled
-        # wasm as a *file*, at macro-expansion time — a dependency invisible
-        # to Cargo's own build graph (deliberately: a real Cargo dependency
-        # on polaris-market here caused a wasm export symbol collision, see
-        # contracts/vault/src/lib.rs). Cargo has no reason to order these
-        # two builds relative to each other on its own, so this step is
-        # split out and run first, explicitly, rather than trusting
-        # incidental scheduling to keep working.
-        run: cargo build --release --target wasm32v1-none -p polaris-market
-      - name: Build the rest
-        run: |
-          cargo build --release --target wasm32v1-none \
-            -p polaris-mock-lazer -p polaris-mock-redstone -p polaris-smart-wallet \
-            -p polaris-smart-wallet-factory -p polaris-vault -p polaris-perpetual
+      - uses: extractions/setup-just@v2
+      # Keeps the `release-with-logs` profile (Cargo.toml) from rotting: it is
+      # only for diagnostic testnet deploys, never mainnet, but it must still
+      # compile. Same ordering constraint as the wasm-build job above, encoded
+      # in the justfile.
+      - run: just build-wasm-logs
