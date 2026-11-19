@@ -297,3 +297,96 @@ fn get_origin_returns_stored_origin() {
     client.init(&pk, &origin(&env));
     assert_eq!(client.get_origin(), origin(&env));
 }
+
+#[test]
+fn up_flag_cleared_rejected() {
+    let env = Env::default();
+    let contract_id = env.register(SmartWallet, ());
+    let client = SmartWalletClient::new(&env, &contract_id);
+
+    let (pk, payload, mut signature) = known_good_vector(&env);
+    client.init(&pk, &origin(&env));
+
+    // Byte 32 is the flags byte; clear UP (0x01). The signature no longer
+    // matches the edited authenticator_data, but the flag check runs before
+    // any crypto, so this is a deterministic typed rejection.
+    let mut data = [0u8; 37];
+    data.copy_from_slice(
+        signature
+            .authenticator_data
+            .slice(0..37)
+            .to_buffer::<37>()
+            .as_slice(),
+    );
+    data[32] &= !0x01;
+    signature.authenticator_data = Bytes::from_array(&env, &data);
+
+    let result: Result<(), Result<Error, _>> = env.try_invoke_contract_check_auth::<Error>(
+        &contract_id,
+        &payload,
+        signature.into_val(&env),
+        &vec![&env],
+    );
+    assert_eq!(result, Err(Ok(Error::UserNotVerified)));
+}
+
+#[test]
+fn uv_flag_cleared_rejected() {
+    let env = Env::default();
+    let contract_id = env.register(SmartWallet, ());
+    let client = SmartWalletClient::new(&env, &contract_id);
+
+    let (pk, payload, mut signature) = known_good_vector(&env);
+    client.init(&pk, &origin(&env));
+
+    // UV (0x04) is mandatory: a presence-only assertion would downgrade the
+    // Face ID / Touch ID promise this wallet makes.
+    let mut data = [0u8; 37];
+    data.copy_from_slice(
+        signature
+            .authenticator_data
+            .slice(0..37)
+            .to_buffer::<37>()
+            .as_slice(),
+    );
+    data[32] &= !0x04;
+    signature.authenticator_data = Bytes::from_array(&env, &data);
+
+    let result: Result<(), Result<Error, _>> = env.try_invoke_contract_check_auth::<Error>(
+        &contract_id,
+        &payload,
+        signature.into_val(&env),
+        &vec![&env],
+    );
+    assert_eq!(result, Err(Ok(Error::UserNotVerified)));
+}
+
+#[test]
+fn short_authenticator_data_rejected() {
+    let env = Env::default();
+    let contract_id = env.register(SmartWallet, ());
+    let client = SmartWalletClient::new(&env, &contract_id);
+
+    let (pk, payload, mut signature) = known_good_vector(&env);
+    client.init(&pk, &origin(&env));
+
+    // 36 bytes: rpIdHash + flags + only 3 of the 4 signCount bytes — no
+    // room for a complete fixed prefix, so flags can't be trusted.
+    let mut data = [0u8; 36];
+    data.copy_from_slice(
+        signature
+            .authenticator_data
+            .slice(0..36)
+            .to_buffer::<36>()
+            .as_slice(),
+    );
+    signature.authenticator_data = Bytes::from_array(&env, &data);
+
+    let result: Result<(), Result<Error, _>> = env.try_invoke_contract_check_auth::<Error>(
+        &contract_id,
+        &payload,
+        signature.into_val(&env),
+        &vec![&env],
+    );
+    assert_eq!(result, Err(Ok(Error::AuthenticatorDataTooShort)));
+}

@@ -45,6 +45,7 @@ app is at
 - [Errors, not panics](#errors-not-panics)
 - [Cost-driven fee curve](#cost-driven-fee-curve)
 - [Passkey smart wallets](#passkey-smart-wallets)
+- [Wallet policy: what a passkey assertion authorizes](#wallet-policy-what-a-passkey-assertion-authorizes)
 - [The capital-efficiency vault](#the-capital-efficiency-vault)
 - [On-chain second-oracle: Reflector Network](#on-chain-second-oracle-reflector-network)
 - [A second settlement path: settle_via_reflector](#a-second-settlement-path-settle_via_reflector)
@@ -370,6 +371,122 @@ factory keep running their original wasm, with no origin binding —
 unaffected, same "redeploy rather than retrofit" pattern as the vault's
 admin-rotation incident above) — the address listed under
 [Live on testnet](#live-on-testnet).
+
+## Factory generations and migration
+
+A wallet's address is `deploy()`'s deterministic function of
+`(this factory instance, sha256(public_key))` — see
+[Portable identity](#portable-identity). That determinism is the feature, but
+it has a sharp edge worth stating plainly: **a new factory instance is a new
+generation, and every user's wallet address changes with it.** Redeploying
+the factory (new contract ID, e.g. after a wasm upgrade, a new
+relying-party `origin`, or a lost/rotated admin key) does not move, upgrade,
+or invalidate any existing wallet — it simply means `resolve(public_key)`
+against the *new* factory returns an address that has never been deployed,
+while the user's funds and history still live at the *old* generation's
+address. Nothing on-chain links the two; the mapping is the backend's job.
+
+### What a generation is
+
+| Generation | Factory contract ID | Pinned `wasm_hash` | Pinned `origin` |
+|---|---|---|---|
+| G1 | `C…` (first deployed) | wallet wasm v1 | `https://app.polaris.xyz` |
+| G2 | `C…` (redeployed) | wallet wasm v2 | `https://app.polaris.xyz` |
+
+`initialize(admin, wasm_hash, origin)` is one-time and there is no setter for
+either value (see the decision below), so a generation's `(wasm_hash,
+origin)` pair is immutable for that factory's whole life. Changing either
+means deploying a new factory — a new generation — not editing the old one.
+
+### Migration procedure
+
+1. **Freeze the old generation.** Stop pointing new sign-ups at the old
+   factory. Existing wallets keep working exactly as before — `deploy` is
+   only ever called once per key, and `__check_auth` on an already-deployed
+   wallet never consults the factory — so this is a routing change, not an
+   on-chain one.
+2. **Deploy and initialize the new factory** with the new `wasm_hash` and/or
+   `origin`, and record its contract ID as the current generation in the
+   backend's config (alongside the old IDs, never replacing them).
+3. **Sweep old-wallet funds.** For each user with a balance at an old
+   generation's address, the wallet itself must authorize the move — the
+   factory has no authority over a deployed wallet, and neither does the
+   admin. The passkey signs a transfer (or a `redeem`/`withdraw` from
+   whatever contract holds the position) out of the old wallet to the new
+   one, exactly as any other user transaction. Two practical consequences:
+   - Sweeping is **user-driven or backend-prompted, never unilateral**. A
+     user who never signs keeps their funds at the old address indefinitely;
+     that is safe, just inconvenient, and must be surfaced in the UI rather
+     than silently ignored.
+   - Sweep *before* the old wallet's instance storage TTL lapses, or budget
+     for a `RestoreFootprintOp` first (see
+     [Instance-storage TTL](#instance-storage-ttl)).
+4. **Resolve across generations in the backend.** `resolve(public_key)` is
+   per-factory, so the backend must try generations newest-first and treat
+   the first *deployed* address as the user's wallet:
+
+   ```
+   for factory in [current, ...older_generations]:   # newest first
+       addr = simulate resolve(factory, public_key)
+       if addr has code (deployed): return addr
+   return None   # no wallet yet — deploy against `current`
+   ```
+
+   `resolve` is a free simulated read, so this costs nothing on-chain. The
+   generation list is append-only config; never drop an old factory ID while
+   any wallet at it still holds funds or history.
+5. **Keep old generations readable forever.** Old factory instances stay
+   deployed and initialized (their storage TTL is bumped on every `deploy`,
+   but a dormant one needs an occasional `extend_ttl`/restore). They are
+   never re-initialized, never re-pointed, and never treated as
+   authoritative for new deploys.
+
+### Decision: no admin-gated in-place updates to `wasm_hash`/`origin`
+
+**Rejected.** `initialize` stays one-time and there is deliberately no
+`set_wasm_hash`/`set_origin` entrypoint. Rationale:
+
+- **`origin` is a security boundary, not a setting.** `__check_auth` binds
+  every signature to the wallet's stored `origin` (see
+  [Relying-party `origin`/`type` checks](#relying-party-origintype-checks--a-missing-webauthn-verification-step-found-in-a-security-review)).
+  An admin who could re-point a live factory's `origin` could make every
+  wallet it deploys accept assertions from a domain the admin controls —
+  i.e. mint themselves signing authority over other people's wallets. That
+  is a rug-pull primitive, and "the admin is trusted" is not a reason to
+  build one into a non-custodial system.
+- **`wasm_hash` is the same class of risk.** It is pinned precisely so that
+  `deploy` — which is unauthenticated by design — can never be steered to
+  attacker-chosen code (see
+  [Factory wasm pinning](#factory-wasm-pinning--a-real-confirmed-exploitable-bug-that-shipped-fixed)).
+  A mutable hash reintroduces that bug with an admin key as the only guard.
+- **In-place updates would not even solve the stated problem.** Changing a
+  factory's config does not move existing wallets: their addresses are
+  already fixed, and their stored `origin` is baked into the wallet at
+  `init`. A config change would only affect *future* deploys, producing a
+  silent split where one factory ID serves two incompatible wallet
+  generations — strictly worse for the backend than an explicit new
+  factory ID.
+- **A new generation is auditable and reversible.** A new factory ID is a
+  visible, on-chain event; the old one keeps working; the backend's
+  generation list makes the switch explicit. An in-place mutation is
+  invisible to users and irreversible.
+
+If a factory's config must change, deploy a new factory and follow the
+migration procedure above. The only admin power over a factory is the
+one-time `initialize`.
+
+## Wallet policy: what a passkey assertion authorizes
+
+`__check_auth` verifies *who* signed (the passkey, from the pinned origin,
+over this transaction's payload) but not *what* the payload authorizes: the
+`auth_contexts` argument is ignored, so one approved Face ID prompt can
+authorize any invocation tree the host built — any contract, any function,
+any amount. The threat (a malicious frontend or embedder), the candidate
+policies (contract allowlist, native XLM spend cap), and how either would
+interact with the factory-generation upgrade model are written up in
+[`docs/issues/92-wallet-policy.md`](docs/issues/92-wallet-policy.md).
+Implementation is a follow-up; nothing in this section is enforced on-chain
+today.
 
 ## The capital-efficiency vault
 

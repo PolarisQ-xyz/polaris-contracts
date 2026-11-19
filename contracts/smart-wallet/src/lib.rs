@@ -59,6 +59,33 @@
 //! against; (1)+(2) without (3) can't distinguish *where* the signing
 //! ceremony actually happened.
 //!
+//! ## What `__check_auth` still does not constrain: *what* was authorized
+//!
+//! All three checks above prove the owner's passkey approved *this*
+//! transaction's `signature_payload`. They say nothing about the contents of
+//! that payload: `_auth_contexts` is accepted and ignored, so a single valid
+//! assertion authorizes every invocation in the tree the host built — any
+//! contract, any function, any amount. A malicious frontend or embedder that
+//! gets the owner to approve one Face ID prompt can therefore have the wallet
+//! call anything the wallet's address is allowed to call. An optional
+//! allowlist / spend-cap policy enforced by iterating `auth_contexts` is
+//! designed in `docs/issues/92-wallet-policy.md`; it is not implemented here.
+//!
+//! ## `authenticator_data.rpIdHash` (WebAuthn §7.2 step 13) — checked
+//!
+//! The first 32 bytes of `authenticator_data` are `rpIdHash =
+//! sha256(rpId)`, the relying party the authenticator believes it is
+//! signing for. §7.2 requires the verifier to compare it against
+//! `sha256(expected rpId)` and reject on mismatch. This build does check
+//! it: `init` pins `sha256(rp_id)` alongside the origin (the factory
+//! passes it, derived from the same pinned origin), and `__check_auth`
+//! rejects any assertion whose `rpIdHash` differs with `RpIdMismatch`.
+//! Without it, an assertion produced for a *different* relying party that
+//! happens to share this wallet's key would be accepted as long as its
+//! `client_data_json` origin matched — the origin check alone is a
+//! client-supplied string, while `rpIdHash` is covered by the signature
+//! and set by the authenticator itself.
+//!
 //! ## A property this build does not implement
 //!
 //! Real WebAuthn deployments must track and reject replayed authenticator
@@ -86,6 +113,7 @@ mod test;
 
 const STORAGE_KEY_PK: Symbol = symbol_short!("pk");
 const STORAGE_KEY_ORIGIN: Symbol = symbol_short!("origin");
+const STORAGE_KEY_RP_ID_HASH: Symbol = symbol_short!("rpidhash");
 /// Same bump window `contracts/market`/`contracts/perpetual` use — see
 /// #11: unlike those two (bumped as a side effect of every trade), this
 /// contract is only ever touched by `init` (once) and `__check_auth`
@@ -108,6 +136,9 @@ pub enum Error {
     ClientDataJsonParseError = 4,
     OriginMismatch = 5,
     TypeMismatch = 6,
+    RpIdMismatch = 7,
+    AuthenticatorDataTooShort = 8,
+    UserNotVerified = 9,
 }
 
 #[contract]
@@ -124,12 +155,26 @@ impl SmartWallet {
     /// `origin` is fixed for the wallet's lifetime, same as `public_key` —
     /// see `__check_auth`'s doc comment for why this can't be a
     /// `deploy()`-time caller parameter instead.
-    pub fn init(env: Env, public_key: BytesN<65>, origin: Bytes) -> Result<(), Error> {
+    ///
+    /// `rp_id_hash` is `sha256(rp_id)` — the value WebAuthn puts in the
+    /// first 32 bytes of `authenticator_data` — pinned here so
+    /// `__check_auth` can enforce WebAuthn §7.2's `rpIdHash` check. The
+    /// factory derives it from the same pinned origin it passes as
+    /// `origin`, so the two can never disagree.
+    pub fn init(
+        env: Env,
+        public_key: BytesN<65>,
+        origin: Bytes,
+        rp_id_hash: BytesN<32>,
+    ) -> Result<(), Error> {
         if env.storage().instance().has(&STORAGE_KEY_PK) {
             return Err(Error::AlreadyInitialized);
         }
         env.storage().instance().set(&STORAGE_KEY_PK, &public_key);
         env.storage().instance().set(&STORAGE_KEY_ORIGIN, &origin);
+        env.storage()
+            .instance()
+            .set(&STORAGE_KEY_RP_ID_HASH, &rp_id_hash);
         touch(&env);
         Ok(())
     }
@@ -145,6 +190,13 @@ impl SmartWallet {
         env.storage()
             .instance()
             .get(&STORAGE_KEY_ORIGIN)
+            .ok_or(Error::NotInitialized)
+    }
+
+    pub fn get_rp_id_hash(env: Env) -> Result<BytesN<32>, Error> {
+        env.storage()
+            .instance()
+            .get(&STORAGE_KEY_RP_ID_HASH)
             .ok_or(Error::NotInitialized)
     }
 }
@@ -184,6 +236,10 @@ impl CustomAccountInterface for SmartWallet {
         env: Env,
         signature_payload: Hash<32>,
         signature: Signature,
+        // Deliberately unused: this wallet authorizes *who* signed, not
+        // *what* was signed. See the module doc and
+        // `docs/issues/92-wallet-policy.md` for the optional policy that
+        // would iterate these contexts.
         _auth_contexts: Vec<Context>,
     ) -> Result<(), Error> {
         let public_key = env
@@ -237,6 +293,50 @@ impl CustomAccountInterface for SmartWallet {
             .ok_or(Error::NotInitialized)?;
         if Bytes::from_slice(&env, client_data.origin.as_bytes()) != expected_origin {
             return Err(Error::OriginMismatch);
+        }
+
+        // WebAuthn §7.2 step 13: the first 32 bytes of `authenticator_data`
+        // are `sha256(rpId)` — set by the authenticator, covered by the
+        // signature, and therefore not something a relaying page can forge.
+        // Must equal the `sha256(rp_id)` pinned at `init`.
+        let expected_rp_id_hash: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&STORAGE_KEY_RP_ID_HASH)
+            .ok_or(Error::NotInitialized)?;
+        if signature.authenticator_data.len() < 32 {
+            return Err(Error::RpIdMismatch);
+        }
+        let mut rp_id_hash = [0u8; 32];
+        rp_id_hash.copy_from_slice(
+            signature
+                .authenticator_data
+                .slice(0..32)
+                .to_buffer::<32>()
+                .as_slice(),
+        );
+        if BytesN::from_array(&env, &rp_id_hash) != expected_rp_id_hash {
+            return Err(Error::RpIdMismatch);
+        }
+
+        // WebAuthn §6.1: `authenticator_data` is
+        //   rpIdHash(32) ‖ flags(1) ‖ signCount(4) ‖ ...
+        // so the flags byte is at offset 32 and the fixed prefix is 37
+        // bytes. Anything shorter can't carry flags at all — reject with a
+        // typed error rather than slicing out of bounds (which would trap).
+        if signature.authenticator_data.len() < 37 {
+            return Err(Error::AuthenticatorDataTooShort);
+        }
+        let flags = signature.authenticator_data.get(32).unwrap_or(0);
+        const FLAG_UP: u8 = 0x01; // user present
+        const FLAG_UV: u8 = 0x04; // user verified
+        // UP must be set: the user was physically present at the
+        // authenticator. UV must be set too — this wallet's whole premise is
+        // a Face ID / Touch ID / Windows Hello passkey, i.e. a *verified*
+        // user; accepting a bare presence check would silently downgrade
+        // that promise.
+        if flags & FLAG_UP == 0 || flags & FLAG_UV == 0 {
+            return Err(Error::UserNotVerified);
         }
 
         touch(&env);
