@@ -865,6 +865,36 @@ fn settle_via_reflector_rejects_a_price_that_predates_expiry_by_more_than_the_fr
 }
 
 #[test]
+fn settle_via_reflector_rejects_a_price_timestamped_after_the_freshness_window() {
+    // Upper bound mirroring the Lazer path: a price timestamped more than
+    // PRICE_FRESHNESS_WINDOW_SECS *after expiry* must not settle the market,
+    // otherwise a caller could pick any post-expiry print during the grace
+    // window.
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    let future_ts = h.expiry + PRICE_FRESHNESS_WINDOW_SECS + 1;
+    let reflector_client = mock_sep40::MockSep40Client::new(&h.env, &h.reflector_id);
+    reflector_client.set_price(&(1_000_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &future_ts);
+    h.env.ledger().set_timestamp(future_ts);
+    let res = client.try_settle_via_reflector();
+    assert_eq!(res, Err(Ok(Error::FuturePrice)));
+    assert_eq!(client.get_market().status, MarketStatus::Open);
+}
+
+#[test]
+fn settle_via_reflector_accepts_a_price_at_the_freshness_window_edge() {
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    let edge_ts = h.expiry + PRICE_FRESHNESS_WINDOW_SECS;
+    let reflector_client = mock_sep40::MockSep40Client::new(&h.env, &h.reflector_id);
+    reflector_client.set_price(&(1_000_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &edge_ts);
+    h.env.ledger().set_timestamp(edge_ts);
+    client.settle_via_reflector();
+    assert_eq!(client.get_market().status, MarketStatus::ResolvedYes);
+    assert_solvent(&h);
+}
+
+#[test]
 fn settle_via_reflector_rejects_decimals_drift_since_initialize() {
     let h = setup(1_000_000, 10_000);
     let client = PolarisMarketClient::new(&h.env, &h.market_id);

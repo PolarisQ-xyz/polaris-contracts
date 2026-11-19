@@ -484,6 +484,13 @@ falling through to the permissionless `cancel` liveness backstop if
 Reflector itself is also unavailable/stale/divergent, or the market was
 deployed from a wasm older than this function's existence.
 
+**Timestamp bound**: like `settle`, the Reflector price must be timestamped
+within `PRICE_FRESHNESS_WINDOW_SECS` (300s) of `expiry` on *both* sides —
+`price.timestamp + 300 < expiry` rejects with `StalePrice`, and
+`price.timestamp > expiry + 300` rejects with `FuturePrice`. Without the
+upper bound a caller could settle on any post-expiry print during the grace
+window, so the two paths enforce the same window.
+
 ## A third oracle: RedStone
 
 `settle`/`record_price_checkpoint` can optionally corroborate against a

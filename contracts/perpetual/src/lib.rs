@@ -48,7 +48,8 @@
 //! at all. `record_price_checkpoint` gives a concrete, safe stand-in for
 //! "reference price" — it reuses the exact dual-oracle (Lazer + Reflector)
 //! verification `polaris-market`'s `settle` already uses, but has **zero**
-//! economic effect: it only records `last_price_cents`/`last_price_at` for
+//! economic effect: it only records `last_price_cents`/`last_price_at` (the
+//! latter being the feed's own timestamp, monotonic across checkpoints) for
 //! observability, never touches a pool, a balance, or `total_supply`.
 //!
 //! ## Winding down: `terminate`, not `settle`
@@ -143,6 +144,10 @@ pub enum Error {
     /// `pause()`'s doc comment, identical rationale to `polaris-market`'s
     /// `Error::Paused`.
     Paused = 31,
+    /// `record_price_checkpoint` was handed a payload whose feed timestamp is
+    /// not strictly newer than the one already stored — an older (or equal)
+    /// price must never overwrite a newer checkpoint.
+    StaleCheckpoint = 32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -212,6 +217,8 @@ pub struct Perpetual {
     pub initial_liquidity: i128,
     /// Purely informational — see the module doc's "what perpetual means
     /// here" section. `0` until the first successful checkpoint.
+    /// `last_price_at` is the *feed's* own timestamp (seconds), not ledger
+    /// time, and is strictly increasing across successful checkpoints.
     pub last_price_cents: i128,
     pub last_price_at: u64,
 }
@@ -584,6 +591,9 @@ impl PolarisPerpetual {
     /// `total_supply` mutation, ever.
     pub fn record_price_checkpoint(env: Env, payload: Bytes) -> Result<(), Error> {
         let mut m = load_market(&env)?;
+        if m.status != PerpetualStatus::Open {
+            return Err(Error::MarketNotOpen);
+        }
         let oracle = load_price_oracle(&env).ok_or(Error::PriceOracleNotConfigured)?;
         let now = env.ledger().timestamp();
 
@@ -628,10 +638,17 @@ impl PolarisPerpetual {
                 OracleCheckError::Divergent => Error::OracleDivergence,
             })?;
 
+        // Monotonicity: `last_price_at` holds the *feed's* timestamp, so a
+        // replay of an older payload (still inside the freshness window)
+        // must not roll the checkpoint backwards.
+        if m.last_price_at != 0 && feed_ts_secs <= m.last_price_at {
+            return Err(Error::StaleCheckpoint);
+        }
+
         m.last_price_cents = final_cents;
-        m.last_price_at = now;
+        m.last_price_at = feed_ts_secs;
         save_market(&env, &m);
-        env.events().publish((symbol_short!("chkpt"),), (final_cents, now));
+        env.events().publish((symbol_short!("chkpt"),), (final_cents, feed_ts_secs));
         Ok(())
     }
 

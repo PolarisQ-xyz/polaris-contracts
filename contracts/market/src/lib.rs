@@ -48,6 +48,17 @@
 //! cancels and refunds through the exact same well-tested path every other
 //! unresolvable market already uses, preserving the "nobody unilaterally
 //! decides" property even in the failure case.
+//!
+//! ## Deterministic settlement price
+//!
+//! `settle()` is permissionless and the caller supplies the signed Lazer
+//! payload, so *which* print is used must not be the caller's choice. The
+//! rule: the print must be timestamped at or before `expiry`, and no more
+//! than `PRICE_FRESHNESS_WINDOW_SECS` (300s) before it. Post-expiry prints
+//! are rejected (`FuturePrice`) even though they are fresher — accepting
+//! them would let the caller pick any print in `[expiry, expiry + 300s]`
+//! and settle on whichever side of the strike they hold. `settle_via_reflector`
+//! enforces the identical bound on Reflector's `lastprice` timestamp.
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes, Env,
@@ -68,6 +79,15 @@ use polaris_ctf_math::{
 /// Protocol fee ceiling: 1000 bps = 10%.
 const MAX_FEE_BPS: u32 = 1_000;
 /// Settlement price must be timestamped within this many seconds of expiry.
+///
+/// Asymmetric on purpose (see the README's settlement section): a print
+/// timestamped *before* expiry is still accepted within this window, but a
+/// print timestamped *after* expiry is rejected outright. The caller of
+/// `settle()` picks which signed update to submit, so accepting a
+/// post-expiry print would let them choose the settlement price from any
+/// print in `[expiry, expiry + 300s]` — a free option on the outcome.
+/// Pre-expiry prints are not a choice: the last print at or before expiry
+/// is the price the market was actually trading at when it closed.
 const PRICE_FRESHNESS_WINDOW_SECS: u64 = 300;
 /// Instance/persistent storage TTL bump (ledgers), applied on every write.
 const BUMP_TO: u32 = 535_680; // ~31 days at 5s/ledger
@@ -93,7 +113,12 @@ pub enum Error {
     ExpiryNotReached = 14,
     InvalidPayload = 15,
     FeedNotFound = 16,
+    /// Settlement print is more than `PRICE_FRESHNESS_WINDOW_SECS` before
+    /// `expiry` — too old to be the price the market closed at.
     StalePrice = 17,
+    /// Settlement print is timestamped *after* `expiry`. Rejected even
+    /// within the freshness window: the caller of `settle()` chooses the
+    /// payload, so a post-expiry print would let them pick the outcome.
     FuturePrice = 18,
     GracePeriodNotElapsed = 19,
     AlreadyFinalized = 20,
@@ -696,10 +721,16 @@ impl PolarisMarket {
         let feed_ts_micros = feed.feed_update_timestamp.unwrap_or(verified.timestamp);
         let feed_ts_secs = feed_ts_micros / 1_000_000;
 
+        // Deterministic settlement-price rule: the print must be at or
+        // before expiry (and no more than PRICE_FRESHNESS_WINDOW_SECS
+        // before it). A post-expiry print is rejected even though it is
+        // "fresher" — otherwise the caller of `settle()` could pick any
+        // signed update in `[expiry, expiry + 300s]` and choose the
+        // outcome. See the README's settlement section.
         if feed_ts_secs + PRICE_FRESHNESS_WINDOW_SECS < m.expiry {
             return Err(Error::StalePrice);
         }
-        if feed_ts_secs > m.expiry + PRICE_FRESHNESS_WINDOW_SECS {
+        if feed_ts_secs > m.expiry {
             return Err(Error::FuturePrice);
         }
 
@@ -769,6 +800,12 @@ impl PolarisMarket {
         // called long after expiry on a stalled feed.
         if price.timestamp + PRICE_FRESHNESS_WINDOW_SECS < m.expiry {
             return Err(Error::StalePrice);
+        }
+        // Upper bound mirroring the Lazer path exactly: a price timestamped
+        // after expiry is not a settlement price for this market, so reject
+        // it rather than settling on a post-expiry print the caller chose.
+        if price.timestamp > m.expiry {
+            return Err(Error::FuturePrice);
         }
         let decimals = client.decimals();
         if decimals != m.reflector_decimals_at_init {
