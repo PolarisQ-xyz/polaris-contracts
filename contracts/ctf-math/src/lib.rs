@@ -223,8 +223,21 @@ pub enum OracleCheckError {
     /// it at `initialize()` and failing closed on drift turns that into a
     /// safe, detected rejection instead.
     DecimalsChanged,
+    /// The oracle's `price.timestamp` is further in the future than
+    /// `MAX_FUTURE_SKEW_SECS` allows. Without this upper bound a
+    /// future-dated price would pass the staleness check forever (its
+    /// timestamp only ever looks "fresh"), so a compromised or buggy feed
+    /// could pin a price that never expires.
+    FutureDated,
     Divergent,
 }
+
+/// How far ahead of `now` a corroborating oracle's `price.timestamp` may be
+/// before it's rejected as future-dated. Oracles stamp prices with their own
+/// clock, which can legitimately run slightly ahead of the ledger's; 60s is
+/// comfortably above that skew while still bounding how long a future-dated
+/// price could otherwise stay "fresh" (see `OracleCheckError::FutureDated`).
+pub const MAX_FUTURE_SKEW_SECS: u64 = 60;
 
 /// Verifies one corroborating SEP-40 oracle leg against `reference_cents`
 /// (the already-verified Lazer price) — the exact check
@@ -243,6 +256,9 @@ pub fn verify_oracle_corroboration(
     let price = client.lastprice(&cfg.asset).ok_or(OracleCheckError::Unavailable)?;
     if price.timestamp + cfg.max_staleness_secs < now {
         return Err(OracleCheckError::Stale);
+    }
+    if price.timestamp > now + MAX_FUTURE_SKEW_SECS {
+        return Err(OracleCheckError::FutureDated);
     }
     let decimals = client.decimals();
     if !(2..=30).contains(&decimals) {

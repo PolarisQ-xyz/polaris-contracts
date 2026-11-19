@@ -1083,6 +1083,81 @@ fn cancel_after_grace_refunds_a_matched_pair_at_merge_parity() {
 }
 
 #[test]
+fn init_rejects_oversize_expiry_and_grace_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_id = sac.address();
+    token::StellarAssetClient::new(&env, &token_id).mint(&admin, &1_000_000);
+    let lazer_id = env.register(mock_lazer::MockLazer, ());
+    let reflector_id = env.register(mock_sep40::MockSep40, ());
+    let reflector_config = default_reflector_config(&env, &reflector_id);
+    let expiry = env.ledger().timestamp() + DAY;
+
+    // `expiry + grace_period` must never be able to overflow u64.
+    let bad_expiry = env.register(PolarisMarket, ());
+    let c = PolarisMarketClient::new(&env, &bad_expiry);
+    assert_eq!(
+        c.try_initialize(&admin, &token_id, &6_000_000i128, &u64::MAX, &3600u64, &lazer_id, &FEED_ID, &100u32, &20u32, &treasury, &1000i128, &reflector_config, &None),
+        Err(Ok(Error::InvalidExpiry))
+    );
+
+    let bad_grace = env.register(PolarisMarket, ());
+    let c = PolarisMarketClient::new(&env, &bad_grace);
+    assert_eq!(
+        c.try_initialize(&admin, &token_id, &6_000_000i128, &expiry, &u64::MAX, &lazer_id, &FEED_ID, &100u32, &20u32, &treasury, &1000i128, &reflector_config, &None),
+        Err(Ok(Error::InvalidGracePeriod))
+    );
+}
+
+#[test]
+fn cancel_works_at_maximum_allowed_expiry_and_grace() {
+    // The permissionless backstop must still fire for a market initialized
+    // at the largest bounds `initialize` accepts — the overflow this guards
+    // against would have made `cancel` trap forever.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_id = sac.address();
+    token::StellarAssetClient::new(&env, &token_id).mint(&admin, &1_000_000);
+    let lazer_id = env.register(mock_lazer::MockLazer, ());
+    let reflector_id = env.register(mock_sep40::MockSep40, ());
+    let market_id = env.register(PolarisMarket, ());
+    let client = PolarisMarketClient::new(&env, &market_id);
+
+    let expiry = u64::MAX / 2;
+    let grace = u64::MAX / 2;
+    client.initialize(
+        &admin,
+        &token_id,
+        &6_000_000i128,
+        &expiry,
+        &grace,
+        &lazer_id,
+        &FEED_ID,
+        &100u32,
+        &20u32,
+        &treasury,
+        &1_000i128,
+        &default_reflector_config(&env, &reflector_id),
+        &None,
+    );
+
+    env.ledger().set_timestamp(expiry + grace - 1);
+    assert_eq!(client.try_cancel(), Err(Ok(Error::GracePeriodNotElapsed)));
+
+    env.ledger().set_timestamp(expiry + grace);
+    client.cancel();
+    assert_eq!(client.get_market().status, MarketStatus::Cancelled);
+}
+
+#[test]
 fn cancel_refunds_directional_bettor_half_value_no_counterparty_needed() {
     // The scenario the original parimutuel design special-cased ("empty
     // winning pool"): a single bettor takes a directional position and the

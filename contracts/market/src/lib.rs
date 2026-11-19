@@ -67,8 +67,19 @@ use polaris_ctf_math::{
 
 /// Protocol fee ceiling: 1000 bps = 10%.
 const MAX_FEE_BPS: u32 = 1_000;
+/// Oracle corroboration tolerance ceiling: 1000 bps = 10%. A tolerance at or
+/// above 10_000 bps would accept any divergence at all, silently disabling
+/// the second-oracle cross-check; 0 would reject every price outright.
+const MAX_TOLERANCE_BPS: u32 = 1_000;
 /// Settlement price must be timestamped within this many seconds of expiry.
 const PRICE_FRESHNESS_WINDOW_SECS: u64 = 300;
+/// Upper bound on `expiry` and on `grace_period`, so that
+/// `expiry + grace_period` can never overflow `u64` — otherwise `cancel()`,
+/// the permissionless liveness backstop, could trap forever and strand
+/// every holder's funds. Both are capped at `u64::MAX / 2`, which leaves
+/// their sum representable with room to spare.
+const MAX_EXPIRY: u64 = u64::MAX / 2;
+const MAX_GRACE_PERIOD: u64 = u64::MAX / 2;
 /// Instance/persistent storage TTL bump (ledgers), applied on every write.
 const BUMP_TO: u32 = 535_680; // ~31 days at 5s/ledger
 const BUMP_THRESHOLD: u32 = 500_000;
@@ -145,6 +156,12 @@ pub enum Error {
     /// by this, only the AMM-math-dependent entrypoints a pause exists to
     /// protect against.
     Paused = 35,
+    /// Reflector's `price.timestamp` is further in the future than
+    /// `polaris_ctf_math::MAX_FUTURE_SKEW_SECS` allows — see
+    /// `polaris_ctf_math::OracleCheckError::FutureDated`.
+    ReflectorPriceFutureDated = 36,
+    /// Same, for the optional RedStone leg.
+    RedstonePriceFutureDated = 37,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -360,10 +377,10 @@ impl PolarisMarket {
         if strike_price <= 0 {
             return Err(Error::InvalidStrikePrice);
         }
-        if expiry <= env.ledger().timestamp() {
+        if expiry <= env.ledger().timestamp() || expiry > MAX_EXPIRY {
             return Err(Error::InvalidExpiry);
         }
-        if grace_period == 0 {
+        if grace_period == 0 || grace_period > MAX_GRACE_PERIOD {
             return Err(Error::InvalidGracePeriod);
         }
         if feed_id == 0 {
@@ -382,6 +399,12 @@ impl PolarisMarket {
         if reflector.max_staleness_secs < reflector_client.resolution() as u64 {
             return Err(Error::InvalidReflectorConfig);
         }
+        // A tolerance of 0 rejects every price, and one above
+        // `MAX_TOLERANCE_BPS` (or at/above 10_000 bps) accepts any
+        // divergence — either way the corroboration check is disabled.
+        if reflector.tolerance_bps == 0 || reflector.tolerance_bps > MAX_TOLERANCE_BPS {
+            return Err(Error::InvalidReflectorConfig);
+        }
         // Pinned once here, re-checked on every `settle()` call — see
         // `Market::reflector_decimals_at_init`'s doc comment.
         let reflector_decimals_at_init = reflector_client.decimals();
@@ -392,6 +415,9 @@ impl PolarisMarket {
         if let Some(cfg) = &redstone {
             let redstone_client = Sep40Client::new(&env, &cfg.contract);
             if cfg.max_staleness_secs < redstone_client.resolution() as u64 {
+                return Err(Error::InvalidRedstoneConfig);
+            }
+            if cfg.tolerance_bps == 0 || cfg.tolerance_bps > MAX_TOLERANCE_BPS {
                 return Err(Error::InvalidRedstoneConfig);
             }
             let redstone_decimals_at_init = redstone_client.decimals();
@@ -716,6 +742,7 @@ impl PolarisMarket {
                 OracleCheckError::Stale => Error::ReflectorPriceStale,
                 OracleCheckError::DecimalsInvalid => Error::ReflectorDecimalsInvalid,
                 OracleCheckError::DecimalsChanged => Error::ReflectorDecimalsChanged,
+                OracleCheckError::FutureDated => Error::ReflectorPriceFutureDated,
                 OracleCheckError::Divergent => Error::OracleDivergence,
             },
         )?;
@@ -762,6 +789,9 @@ impl PolarisMarket {
         if price.timestamp + m.reflector.max_staleness_secs < now {
             return Err(Error::ReflectorPriceStale);
         }
+        if price.timestamp > now + polaris_ctf_math::MAX_FUTURE_SKEW_SECS {
+            return Err(Error::ReflectorPriceFutureDated);
+        }
         // Same "timestamped near expiry, not just not-stale-right-now"
         // bound the Lazer path enforces via PRICE_FRESHNESS_WINDOW_SECS —
         // a price that's merely within max_staleness_secs of `now` could
@@ -800,6 +830,7 @@ impl PolarisMarket {
             OracleCheckError::Stale => Error::RedstonePriceStale,
             OracleCheckError::DecimalsInvalid => Error::RedstoneDecimalsInvalid,
             OracleCheckError::DecimalsChanged => Error::RedstoneDecimalsChanged,
+            OracleCheckError::FutureDated => Error::RedstonePriceFutureDated,
             OracleCheckError::Divergent => Error::OracleDivergence,
         }
     }
@@ -833,7 +864,10 @@ impl PolarisMarket {
             return Err(Error::AlreadyFinalized);
         }
         let now = env.ledger().timestamp();
-        if now < m.expiry + m.grace_period {
+        // Saturating: `initialize` already bounds both terms so this can't
+        // overflow, but the backstop must never trap even for a market
+        // stored before that bound existed.
+        if now < m.expiry.saturating_add(m.grace_period) {
             return Err(Error::GracePeriodNotElapsed);
         }
 

@@ -78,6 +78,9 @@ use polaris_ctf_math::{
 
 /// Protocol fee ceiling: 1000 bps = 10%. Same figure as `polaris-market`.
 const MAX_FEE_BPS: u32 = 1_000;
+/// Oracle corroboration tolerance ceiling: 1000 bps = 10%. Same figure and
+/// same reasoning as `polaris-market`'s `MAX_TOLERANCE_BPS`.
+const MAX_TOLERANCE_BPS: u32 = 1_000;
 /// A submitted checkpoint price must be timestamped within this many
 /// seconds of "now" — same figure and same reasoning as `polaris-market`'s
 /// `PRICE_FRESHNESS_WINDOW_SECS`, just checked against the call time
@@ -143,6 +146,12 @@ pub enum Error {
     /// `pause()`'s doc comment, identical rationale to `polaris-market`'s
     /// `Error::Paused`.
     Paused = 31,
+    /// Reflector's `price.timestamp` is further in the future than
+    /// `polaris_ctf_math::MAX_FUTURE_SKEW_SECS` allows — see
+    /// `polaris_ctf_math::OracleCheckError::FutureDated`.
+    ReflectorPriceFutureDated = 32,
+    /// Same, for the RedStone leg.
+    RedstonePriceFutureDated = 33,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -355,6 +364,12 @@ impl PolarisPerpetual {
             if oracle.reflector.max_staleness_secs < reflector_client.resolution() as u64 {
                 return Err(Error::InvalidReflectorConfig);
             }
+            // Same tolerance bound as polaris-market's initialize: 0 rejects
+            // every price, anything above `MAX_TOLERANCE_BPS` accepts any
+            // divergence — both disable corroboration.
+            if oracle.reflector.tolerance_bps == 0 || oracle.reflector.tolerance_bps > MAX_TOLERANCE_BPS {
+                return Err(Error::InvalidReflectorConfig);
+            }
             let reflector_decimals_at_init = reflector_client.decimals();
             if !(2..=30).contains(&reflector_decimals_at_init) {
                 return Err(Error::ReflectorDecimalsInvalid);
@@ -362,6 +377,9 @@ impl PolarisPerpetual {
 
             let redstone_client = Sep40Client::new(&env, &oracle.redstone.contract);
             if oracle.redstone.max_staleness_secs < redstone_client.resolution() as u64 {
+                return Err(Error::InvalidRedstoneConfig);
+            }
+            if oracle.redstone.tolerance_bps == 0 || oracle.redstone.tolerance_bps > MAX_TOLERANCE_BPS {
                 return Err(Error::InvalidRedstoneConfig);
             }
             let redstone_decimals_at_init = redstone_client.decimals();
@@ -617,6 +635,7 @@ impl PolarisPerpetual {
                 OracleCheckError::Stale => Error::ReflectorPriceStale,
                 OracleCheckError::DecimalsInvalid => Error::ReflectorDecimalsInvalid,
                 OracleCheckError::DecimalsChanged => Error::ReflectorDecimalsChanged,
+                OracleCheckError::FutureDated => Error::ReflectorPriceFutureDated,
                 OracleCheckError::Divergent => Error::OracleDivergence,
             })?;
         verify_oracle_corroboration(&env, &oracle.redstone, oracle.redstone_decimals_at_init, now, final_cents)
@@ -625,6 +644,7 @@ impl PolarisPerpetual {
                 OracleCheckError::Stale => Error::RedstonePriceStale,
                 OracleCheckError::DecimalsInvalid => Error::RedstoneDecimalsInvalid,
                 OracleCheckError::DecimalsChanged => Error::RedstoneDecimalsChanged,
+                OracleCheckError::FutureDated => Error::RedstonePriceFutureDated,
                 OracleCheckError::Divergent => Error::OracleDivergence,
             })?;
 

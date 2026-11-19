@@ -443,9 +443,18 @@ pub struct OracleFeedConfig {
     pub asset: Asset,            // Stellar(Address) or Other(Symbol)
     pub max_staleness_secs: u64, // validated at initialize() against the
                                   // oracle's own live resolution()
-    pub tolerance_bps: u32,      // default 150 (1.5%)
+    pub tolerance_bps: u32,      // default 150 (1.5%); must be in
+                                  // 1..=1000 (MAX_TOLERANCE_BPS) — see below
 }
 ```
+
+`tolerance_bps` is bounded at `initialize()` for **every** oracle leg, in
+both `PolarisMarket` and `PolarisPerpetual`: it must be non-zero and at most
+`MAX_TOLERANCE_BPS` (1000 bps = 10%). A value of 0 would reject every price,
+and anything above 10% (in particular 10_000 bps or more) would accept any
+divergence at all — silently disabling the corroboration check. Out-of-range
+values are rejected with `InvalidReflectorConfig` (Reflector leg) or
+`InvalidRedstoneConfig` (RedStone leg).
 
 **Fails closed, not gracefully-degrades**: `None`/stale/divergent Reflector
 data all reject `settle` outright. This doesn't strand funds — the existing
