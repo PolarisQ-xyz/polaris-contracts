@@ -10,9 +10,23 @@ use soroban_sdk::{token, Address, Env, Symbol};
 /// num_props(1) + properties...]. We only encode price(0), exponent(4), and
 /// feed_update_timestamp(12) — the three properties `settle` reads.
 fn build_payload(feed_id: u32, price: i64, exponent: i16, feed_ts_micros: u64) -> std::vec::Vec<u8> {
+    build_payload_with_feed_ts(feed_id, price, exponent, feed_ts_micros, Some(feed_ts_micros))
+}
+
+/// Same as `build_payload`, but lets the feed's own `feed_update_timestamp`
+/// property be omitted (`None`) while the payload-level timestamp stays
+/// `payload_ts_micros` — the shape that drives `settle`'s
+/// `unwrap_or(verified.timestamp)` fallback.
+fn build_payload_with_feed_ts(
+    feed_id: u32,
+    price: i64,
+    exponent: i16,
+    payload_ts_micros: u64,
+    feed_ts_micros: Option<u64>,
+) -> std::vec::Vec<u8> {
     let mut b = std::vec::Vec::new();
     b.extend_from_slice(&2_479_346_549u32.to_le_bytes()); // magic
-    b.extend_from_slice(&feed_ts_micros.to_le_bytes()); // top-level timestamp
+    b.extend_from_slice(&payload_ts_micros.to_le_bytes()); // top-level timestamp
     b.push(3); // channel = FixedRate200ms
     b.push(1); // num_feeds
     b.extend_from_slice(&feed_id.to_le_bytes());
@@ -22,8 +36,13 @@ fn build_payload(feed_id: u32, price: i64, exponent: i16, feed_ts_micros: u64) -
     b.push(4); // property: exponent
     b.extend_from_slice(&(exponent as u16).to_le_bytes());
     b.push(12); // property: feed_update_timestamp
-    b.push(1); // exists = true
-    b.extend_from_slice(&feed_ts_micros.to_le_bytes());
+    match feed_ts_micros {
+        Some(ts) => {
+            b.push(1); // exists = true
+            b.extend_from_slice(&ts.to_le_bytes());
+        }
+        None => b.push(0), // exists = false
+    }
     b
 }
 
@@ -73,6 +92,12 @@ fn default_redstone_config(env: &Env, redstone_id: &Address) -> OracleFeedConfig
 }
 
 fn setup(strike_cents: i128, initial_liquidity: i128) -> Harness {
+    setup_with_fees(strike_cents, initial_liquidity, 100, 20)
+}
+
+/// `setup` with an explicit fee curve — for the degenerate configs
+/// (`min == base`, and `base == 0`) that `initialize` also accepts.
+fn setup_with_fees(strike_cents: i128, initial_liquidity: i128, base_fee_bps: u32, min_fee_bps: u32) -> Harness {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000_000);
@@ -102,8 +127,8 @@ fn setup(strike_cents: i128, initial_liquidity: i128) -> Harness {
         &grace,
         &lazer_id,
         &FEED_ID,
-        &100u32, // base fee: 1%
-        &20u32,  // min fee: 0.2%
+        &base_fee_bps,
+        &min_fee_bps,
         &treasury,
         &initial_liquidity,
         &default_reflector_config(&env, &reflector_id),
@@ -671,6 +696,39 @@ fn settle_rejects_stale_price() {
 }
 
 #[test]
+fn settle_accepts_fresh_payload_level_timestamp_when_feed_omits_its_own() {
+    // Fallback branch: the feed carries no `feed_update_timestamp`, so
+    // `settle` must trust the payload-level `verified.timestamp` instead.
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+    let payload = build_payload_with_feed_ts(FEED_ID, 10_000_00000000, -8, h.expiry * 1_000_000, None);
+    let bytes = Bytes::from_slice(&h.env, &payload);
+    set_reflector_price_cents(&h, 1_000_000);
+    client.settle(&bytes);
+
+    let m = client.get_market();
+    assert_eq!(m.status, MarketStatus::ResolvedYes);
+    assert_eq!(m.final_price, 1_000_000);
+    assert_solvent(&h);
+}
+
+#[test]
+fn settle_rejects_stale_payload_level_timestamp_when_feed_omits_its_own() {
+    // Same fallback branch, stale outcome: the payload-level timestamp is
+    // what gets freshness-checked, so an old one must reject.
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    h.env.ledger().set_timestamp(h.expiry);
+    let stale_ts = (h.expiry - 1_000) * 1_000_000; // > 5 min before expiry
+    let payload = build_payload_with_feed_ts(FEED_ID, 10_000_00000000, -8, stale_ts, None);
+    let bytes = Bytes::from_slice(&h.env, &payload);
+    let res = client.try_settle(&bytes);
+    assert_eq!(res, Err(Ok(Error::StalePrice)));
+    assert_eq!(client.get_market().status, MarketStatus::Open);
+}
+
+#[test]
 fn settle_rejects_wrong_feed_id() {
     let h = setup(1_000_000, 10_000);
     let client = PolarisMarketClient::new(&h.env, &h.market_id);
@@ -1172,6 +1230,53 @@ fn fee_never_exceeds_base_even_if_total_supply_dips_back_toward_seed() {
     assert_solvent(&h);
 }
 
+#[test]
+fn flat_fee_curve_keeps_fee_constant_across_volume_growth() {
+    // min == base is a legal config: the (base - min) == 0 arm of the curve.
+    let h = setup_with_fees(1_000_000, 10_000, 50, 50);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 1_000_000);
+
+    assert_eq!(client.get_fee(), 50);
+    client.split(&user, &10_000); // total_supply: 10_000 -> 20_000
+    assert_eq!(client.get_fee(), 50);
+    client.split(&user, &30_000); // total_supply: 20_000 -> 50_000
+    assert_eq!(client.get_fee(), 50);
+    client.split(&user, &950_000); // total_supply: 50_000 -> 1_000_000
+    assert_eq!(client.get_fee(), 50);
+
+    assert_solvent(&h);
+}
+
+#[test]
+fn zero_fee_config_charges_nothing_and_round_trip_loses_only_slippage() {
+    // base == 0 forces min == 0: the all-zero arm of the curve, and
+    // apply_fee(amount, 0) must be a true no-op.
+    let h = setup_with_fees(1_000_000, 10_000, 0, 0);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 1_000_000);
+
+    assert_eq!(client.get_fee(), 0);
+    client.split(&user, &40_000); // total_supply: 10_000 -> 50_000
+    assert_eq!(client.get_fee(), 0);
+
+    let before = token::Client::new(&h.env, &h.token_id).balance(&user);
+    let shares = client.buy(&user, &Prediction::Yes, &1_000, &0);
+    let back = client.sell(&user, &Prediction::Yes, &shares, &0);
+    let after = token::Client::new(&h.env, &h.token_id).balance(&user);
+
+    // Round trip is a loss (CPMM slippage) but never a fee: with zero fee the
+    // pool's k is unchanged by the pair of trades, so the loss is bounded by
+    // slippage alone and strictly less than any 1-bps fee would cost.
+    assert!(back < 1_000, "round trip must lose slippage, got {back}");
+    assert_eq!(after, before - 1_000 + back);
+    assert!(1_000 - back < 100, "loss must be slippage-only, got {}", 1_000 - back);
+
+    assert_solvent(&h);
+}
+
 // ---------- global solvency invariant ----------
 
 fn assert_solvent(h: &Harness) {
@@ -1225,6 +1330,73 @@ fn sell_large_enough_to_exhaust_a_reserve_is_rejected() {
 
     let res = client.try_sell(&user, &Prediction::Yes, &101_000_000, &0);
     assert_eq!(res, Err(Ok(Error::PoolDepthExceeded)));
+    assert_solvent(&h);
+}
+
+/// Smallest `collateral_amount` whose post-fee `cpmm_out` against
+/// `(reserve_in, reserve_out)` lands exactly on `target_out`. `cpmm_out` is
+/// monotonic in `effective_in`, so a binary search finds the boundary trade
+/// without hardcoding fee-curve internals.
+fn collateral_for_amount_out(
+    h: &Harness,
+    reserve_in: i128,
+    reserve_out: i128,
+    target_out: i128,
+) -> i128 {
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    let fee_bps = client.get_fee();
+    let out_at = |collateral: i128| {
+        cpmm_out(reserve_in, reserve_out, apply_fee(collateral, fee_bps))
+    };
+    let mut lo = 1i128;
+    let mut hi = reserve_out * 1_000;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if out_at(mid) >= target_out {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    assert_eq!(out_at(lo), target_out, "no collateral amount hits target_out");
+    lo
+}
+
+#[test]
+fn buy_at_exactly_half_the_reserve_is_rejected() {
+    // Boundary equality: `amount_out * 2 == reserve_out` must be rejected.
+    // The guard is `>=`, so the exact-equality trade is on the rejected side.
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 1_000_000_000);
+
+    let collateral = collateral_for_amount_out(&h, 10_000, 10_000, 5_000);
+    let res = client.try_buy(&user, &Prediction::Yes, &collateral, &0);
+    assert_eq!(res, Err(Ok(Error::PoolDepthExceeded)));
+
+    let m = client.get_market();
+    assert_eq!(m.pool_yes, 10_000);
+    assert_eq!(m.pool_no, 10_000);
+    assert_solvent(&h);
+}
+
+#[test]
+fn buy_one_stroop_under_half_the_reserve_is_accepted() {
+    // Adjacent case: `amount_out * 2 == reserve_out - 1` must be accepted,
+    // and the pool must stay solvent afterwards.
+    let h = setup(1_000_000, 10_000);
+    let client = PolarisMarketClient::new(&h.env, &h.market_id);
+    let user = Address::generate(&h.env);
+    fund(&h, &user, 1_000_000_000);
+
+    let collateral = collateral_for_amount_out(&h, 10_000, 10_000, 4_999);
+    let total = client.buy(&user, &Prediction::Yes, &collateral, &0);
+    assert_eq!(total, collateral + 4_999);
+
+    let m = client.get_market();
+    assert_eq!(m.pool_yes, 10_000 - 4_999);
+    assert_eq!(m.pool_no, 10_000 + collateral);
     assert_solvent(&h);
 }
 
