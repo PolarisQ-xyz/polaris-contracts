@@ -93,6 +93,11 @@ fn setup(strike_cents: i128, initial_liquidity: i128) -> Harness {
 
     token_admin.mint(&admin, &(initial_liquidity * 1000));
 
+    // `initialize` now rejects an oracle with no price for the configured
+    // asset, so seed one before it runs.
+    mock_sep40::MockSep40Client::new(&env, &reflector_id)
+        .set_price(&(1_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &env.ledger().timestamp());
+
     let client = PolarisMarketClient::new(&env, &market_id);
     client.initialize(
         &admin,
@@ -150,6 +155,13 @@ fn setup_with_redstone(strike_cents: i128, initial_liquidity: i128) -> (Harness,
     let grace = 3_600u64;
 
     token_admin.mint(&admin, &(initial_liquidity * 1000));
+
+    // Both legs must have a price for the configured asset before
+    // `initialize` accepts them.
+    mock_sep40::MockSep40Client::new(&env, &reflector_id)
+        .set_price(&(1_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &env.ledger().timestamp());
+    mock_sep40::MockSep40Client::new(&env, &redstone_id)
+        .set_price(&(1_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &env.ledger().timestamp());
 
     let client = PolarisMarketClient::new(&env, &market_id);
     client.initialize(
@@ -350,6 +362,50 @@ fn init_rejects_bad_params() {
         ),
         Err(Ok(Error::InvalidRedstoneConfig)),
         "same staleness-vs-resolution validation applies to an optionally-configured RedStone leg"
+    );
+}
+
+#[test]
+fn init_rejects_oracle_with_no_price_for_the_asset() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_id = sac.address();
+    token::StellarAssetClient::new(&env, &token_id).mint(&admin, &1_000_000);
+    let lazer_id = env.register(mock_lazer::MockLazer, ());
+    let reflector_id = env.register(mock_sep40::MockSep40, ());
+    let redstone_id = env.register(mock_sep40::MockSep40, ());
+    let expiry = env.ledger().timestamp() + DAY;
+    let price = 1_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2);
+    let ts = env.ledger().timestamp();
+
+    // Reflector leg has no price at all.
+    let no_reflector_price = env.register(PolarisMarket, ());
+    let c = PolarisMarketClient::new(&env, &no_reflector_price);
+    assert_eq!(
+        c.try_initialize(
+            &admin, &token_id, &6_000_000i128, &expiry, &3600u64, &lazer_id, &FEED_ID, &100u32, &20u32,
+            &treasury, &1000i128, &default_reflector_config(&env, &reflector_id), &None,
+        ),
+        Err(Ok(Error::ReflectorPriceUnavailable)),
+        "an oracle with no price for the configured asset must be rejected at init"
+    );
+
+    // Reflector priced, but the configured RedStone leg has no price.
+    mock_sep40::MockSep40Client::new(&env, &reflector_id).set_price(&price, &ts);
+    let no_redstone_price = env.register(PolarisMarket, ());
+    let c = PolarisMarketClient::new(&env, &no_redstone_price);
+    assert_eq!(
+        c.try_initialize(
+            &admin, &token_id, &6_000_000i128, &expiry, &3600u64, &lazer_id, &FEED_ID, &100u32, &20u32,
+            &treasury, &1000i128, &default_reflector_config(&env, &reflector_id),
+            &Some(default_redstone_config(&env, &redstone_id)),
+        ),
+        Err(Ok(Error::RedstonePriceUnavailable)),
+        "same check applies to an optionally-configured RedStone leg"
     );
 }
 

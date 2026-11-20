@@ -65,6 +65,18 @@
 //! Because that treatment needs no price at all, `terminate` has **no**
 //! oracle dependency whatsoever — a pure administrative wind-down, which
 //! is a strictly safer shape than a price-dependent one for a safety valve.
+//!
+//! ## Collateral token requirements (see #79)
+//!
+//! Identical to `polaris-market`'s: `collateral` is not pinned to one
+//! hard-coded asset, but must be a standard SEP-41 token whose `transfer`
+//! moves exactly the requested amount, debits the sender, credits the
+//! recipient, and returns `()` — no fee-on-transfer, no rebasing, no
+//! re-entrant transfer hooks. `initialize` probes `decimals()` and rejects
+//! anything above 18 (`Error::InvalidCollateral`); the rest is the
+//! deployer's responsibility, since a non-conforming token breaks the
+//! `balance(contract) == total_supply` invariant, not this contract's
+//! arithmetic.
 
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes, Env};
 
@@ -143,6 +155,11 @@ pub enum Error {
     /// `pause()`'s doc comment, identical rationale to `polaris-market`'s
     /// `Error::Paused`.
     Paused = 31,
+    /// `initialize`-time validation: the `collateral` address is not a
+    /// standard SEP-41 token — its `decimals()` call failed or returned a
+    /// value above 18. Same rationale as `polaris-market`'s
+    /// `Error::InvalidCollateral`; see this crate's module doc.
+    InvalidCollateral = 32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -341,6 +358,11 @@ impl PolarisPerpetual {
         if initial_liquidity <= 0 {
             return Err(Error::InvalidLiquidity);
         }
+        // See the module doc's "Collateral token requirements" — same
+        // `decimals()` probe as `polaris-market`'s `initialize`.
+        if token::Client::new(&env, &collateral).decimals() > 18 {
+            return Err(Error::InvalidCollateral);
+        }
         if let Some(oracle) = &price_oracle {
             if oracle.feed_id == 0 {
                 return Err(Error::InvalidFeedId);
@@ -359,6 +381,11 @@ impl PolarisPerpetual {
             if !(2..=30).contains(&reflector_decimals_at_init) {
                 return Err(Error::ReflectorDecimalsInvalid);
             }
+            // Fail closed at init, not at first checkpoint: an oracle with
+            // no price for the configured asset can never be used.
+            if reflector_client.lastprice(oracle.reflector.asset.clone()).is_none() {
+                return Err(Error::ReflectorPriceUnavailable);
+            }
 
             let redstone_client = Sep40Client::new(&env, &oracle.redstone.contract);
             if oracle.redstone.max_staleness_secs < redstone_client.resolution() as u64 {
@@ -367,6 +394,9 @@ impl PolarisPerpetual {
             let redstone_decimals_at_init = redstone_client.decimals();
             if !(2..=30).contains(&redstone_decimals_at_init) {
                 return Err(Error::RedstoneDecimalsInvalid);
+            }
+            if redstone_client.lastprice(oracle.redstone.asset.clone()).is_none() {
+                return Err(Error::RedstonePriceUnavailable);
             }
 
             // Pinned live here, not trusted from the caller's own struct

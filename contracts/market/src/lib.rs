@@ -25,6 +25,22 @@
 //! - `redeem` pays out 1:1 collateral per winning share (or per share of
 //!   either side, if cancelled).
 //!
+//! ## Collateral token requirements (see #79)
+//!
+//! This build deliberately does **not** pin `collateral` to a single
+//! hard-coded asset (e.g. the native XLM SAC): the same contract is used
+//! for testnet assets and for any standard SEP-41 token an admin chooses.
+//! Instead the requirement is *documented and probed*: `collateral` must
+//! be a standard SEP-41 token whose `transfer` moves exactly the requested
+//! amount, debits the sender, credits the recipient, and returns `()`
+//! (no fee-on-transfer, no rebasing, no transfer hooks that re-enter this
+//! contract, no "returns the amount moved" variants). `initialize` calls
+//! `decimals()` on it and rejects anything that isn't a token with
+//! `0..=18` decimals (`Error::InvalidCollateral`); the rest of the
+//! requirement is not checkable on-chain and is the deployer's
+//! responsibility — a non-conforming token breaks the invariant below, not
+//! this contract's arithmetic.
+//!
 //! Invariant (see tests): `collateral_token.balance(contract) ==
 //! market.total_supply` holds after *every* successful call, for the whole
 //! lifecycle. Because every share is minted as a matched YES+NO pair, the
@@ -145,6 +161,15 @@ pub enum Error {
     /// by this, only the AMM-math-dependent entrypoints a pause exists to
     /// protect against.
     Paused = 35,
+    /// `initialize`-time validation: the `collateral` address is not a
+    /// standard SEP-41 token — its `decimals()` call failed or returned a
+    /// value outside `0..=18`. See the module doc's "Collateral token
+    /// requirements" section: the solvency invariant assumes standard
+    /// SEP-41 transfer semantics, and this is the one cheap on-chain probe
+    /// that rejects the most common non-conforming address (a plain
+    /// account, a contract with no token interface, or a token with
+    /// nonsensical precision) before any liquidity is pulled.
+    InvalidCollateral = 36,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -375,6 +400,16 @@ impl PolarisMarket {
         if initial_liquidity <= 0 {
             return Err(Error::InvalidLiquidity);
         }
+        // See the module doc's "Collateral token requirements": the
+        // solvency invariant assumes standard SEP-41 transfer semantics,
+        // which can't be fully verified on-chain — but a `decimals()` probe
+        // rejects the common non-conforming cases (a plain account, a
+        // contract with no token interface, absurd precision) before any
+        // liquidity is pulled.
+        let collateral_decimals = token::Client::new(&env, &collateral).decimals();
+        if collateral_decimals > 18 {
+            return Err(Error::InvalidCollateral);
+        }
         // An admin can't configure a staleness window narrower than
         // Reflector's own update cadence allows — that would reject every
         // settle attempt outright, not just unlucky ones.
@@ -388,6 +423,11 @@ impl PolarisMarket {
         if !(2..=30).contains(&reflector_decimals_at_init) {
             return Err(Error::ReflectorDecimalsInvalid);
         }
+        // Fail closed at init, not at first settle: an oracle that has no
+        // price for the configured asset can never settle this market.
+        if reflector_client.lastprice(reflector.asset.clone()).is_none() {
+            return Err(Error::ReflectorPriceUnavailable);
+        }
 
         if let Some(cfg) = &redstone {
             let redstone_client = Sep40Client::new(&env, &cfg.contract);
@@ -395,6 +435,9 @@ impl PolarisMarket {
                 return Err(Error::InvalidRedstoneConfig);
             }
             let redstone_decimals_at_init = redstone_client.decimals();
+            if redstone_client.lastprice(cfg.asset.clone()).is_none() {
+                return Err(Error::RedstonePriceUnavailable);
+            }
             if !(2..=30).contains(&redstone_decimals_at_init) {
                 return Err(Error::RedstoneDecimalsInvalid);
             }

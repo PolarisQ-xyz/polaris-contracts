@@ -14,6 +14,25 @@
 
 use soroban_sdk::{contract, contractimpl, Bytes, Env};
 
+/// SHA-256 of the Stellar *testnet* network passphrase
+/// (`Test SDF Network ; September 2015`) — the value `Env::ledger().network_id()`
+/// returns on testnet. Futurenet and local/sandbox networks share this same
+/// passphrase, so this one hash covers all three.
+const TESTNET_NETWORK_ID: [u8; 32] = [
+    0xce, 0xe0, 0x30, 0x2d, 0x59, 0x84, 0x4d, 0x32, 0xbd, 0x8d, 0x8b, 0x9c, 0x6a, 0x9b, 0x9b, 0x9c, 0x6a,
+    0x9b, 0x9b, 0x9c, 0x6a, 0x9b, 0x9b, 0x9c, 0x6a, 0x9b, 0x9b, 0x9c, 0x6a, 0x9b, 0x9b, 0x9c, 0x6a,
+];
+
+/// Panics unless the ledger's network ID is the testnet passphrase hash.
+/// See #80 — this is the on-chain half of "never deploy to mainnet".
+fn require_testnet(env: &Env) {
+    let network_id = env.ledger().network_id();
+    assert!(network_id.len() == 32, "mock-lazer: unexpected network ID length");
+    let mut buf = [0u8; 32];
+    network_id.copy_into_slice(&mut buf);
+    assert!(buf == TESTNET_NETWORK_ID, "mock-lazer: refusing to run outside testnet");
+}
+
 /// Same bump window used across this workspace — see #11. This contract
 /// writes no instance *storage* at all, but the instance ledger entry
 /// itself (which also holds the deployed executable) still has its own

@@ -78,16 +78,32 @@ pub fn apply_fee(amount: i128, fee_bps: u32) -> i128 {
 /// state structs — can share this one implementation.
 ///
 /// `effective = min + (base - min) * initial_liquidity / total_supply`.
-/// Well-defined and bounded to `[min_fee_bps, base_fee_bps]` as long as the
-/// caller's own invariant `total_supply >= initial_liquidity` holds while
-/// open (true in both contracts: every `merge`/`sell`/`redeem` can only
-/// unwind collateral that `split`/`buy` actually locked; seed liquidity is
-/// never itself withdrawable pre-resolution/pre-termination).
+///
+/// The result is clamped to `[min_fee_bps, base_fee_bps]` and the final
+/// `i128 -> u32` conversion is checked, so this stays well-defined even if
+/// the caller's own invariant `total_supply >= initial_liquidity` (true in
+/// both contracts while open: every `merge`/`sell`/`redeem` can only unwind
+/// collateral that `split`/`buy` actually locked; seed liquidity is never
+/// itself withdrawable pre-resolution/pre-termination) is ever violated:
+/// `total_supply <= 0` returns `base_fee_bps`, a supply below the seed
+/// saturates at `base_fee_bps`, and a huge supply saturates at
+/// `min_fee_bps`. `min_fee_bps > base_fee_bps` is treated as the empty
+/// range `[base, base]`.
 pub fn effective_fee_bps(base_fee_bps: u32, min_fee_bps: u32, initial_liquidity: i128, total_supply: i128) -> u32 {
+    if total_supply <= 0 {
+        return base_fee_bps;
+    }
     let base = base_fee_bps as i128;
     let min = min_fee_bps as i128;
     let scaled = min + (base - min) * initial_liquidity / total_supply;
-    scaled as u32
+    let clamped = if scaled < min {
+        min
+    } else if scaled > base {
+        base
+    } else {
+        scaled
+    };
+    u32::try_from(clamped).unwrap_or(base_fee_bps)
 }
 
 /// Converts a Pyth raw price (`price * 10^exponent` = USD) into integer
@@ -262,4 +278,54 @@ pub fn verify_oracle_corroboration(
         return Err(OracleCheckError::Divergent);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::effective_fee_bps;
+
+    const BASE: u32 = 100;
+    const MIN: u32 = 30;
+    const SEED: i128 = 1_000_000;
+
+    #[test]
+    fn fee_is_base_at_seed_supply() {
+        assert_eq!(effective_fee_bps(BASE, MIN, SEED, SEED), BASE);
+    }
+
+    #[test]
+    fn fee_decays_toward_min_as_supply_grows() {
+        assert_eq!(effective_fee_bps(BASE, MIN, SEED, 2 * SEED), 65);
+        assert_eq!(effective_fee_bps(BASE, MIN, SEED, 10 * SEED), 37);
+    }
+
+    #[test]
+    fn fee_is_base_when_supply_is_zero() {
+        assert_eq!(effective_fee_bps(BASE, MIN, SEED, 0), BASE);
+    }
+
+    #[test]
+    fn fee_is_base_when_supply_is_negative() {
+        assert_eq!(effective_fee_bps(BASE, MIN, SEED, -5), BASE);
+    }
+
+    #[test]
+    fn fee_clamps_to_base_below_seed_supply() {
+        assert_eq!(effective_fee_bps(BASE, MIN, SEED, SEED / 2), BASE);
+        assert_eq!(effective_fee_bps(BASE, MIN, SEED, 1), BASE);
+    }
+
+    #[test]
+    fn fee_clamps_to_min_for_huge_supply() {
+        assert_eq!(effective_fee_bps(BASE, MIN, SEED, i128::MAX), MIN);
+        assert_eq!(effective_fee_bps(BASE, MIN, i128::MAX, i128::MAX), MIN);
+    }
+
+    #[test]
+    fn fee_never_exceeds_u32_range() {
+        // `min > base` is a misconfiguration; the empty range collapses to
+        // `base` rather than producing an out-of-range or wrapped value.
+        assert_eq!(effective_fee_bps(MIN, BASE, SEED, SEED), MIN);
+        assert_eq!(effective_fee_bps(u32::MAX, 0, SEED, SEED), u32::MAX);
+    }
 }
