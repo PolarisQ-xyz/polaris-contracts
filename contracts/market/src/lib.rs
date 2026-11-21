@@ -328,6 +328,67 @@ pub struct PolarisMarket;
 
 #[contractimpl]
 impl PolarisMarket {
+    /// One-time setup: fixes every market parameter for this instance's
+    /// whole life and seeds the AMM. Requires `admin`'s auth, and moves
+    /// `initial_liquidity` of `collateral` from `admin` into this contract
+    /// (`pool_yes == pool_no == total_supply == initial_liquidity`, status
+    /// `Open`). There is no re-initialize or reconfigure path: a second
+    /// call returns `AlreadyInitialized`, and a wrong parameter means
+    /// deploying a fresh instance.
+    ///
+    /// Parameters:
+    /// - `admin` — funds the seed liquidity; the only address that can
+    ///   `pause`/`unpause`.
+    /// - `collateral` — the SEP-41 token every share is backed by 1:1
+    ///   (native XLM SAC in this build — see the module doc).
+    /// - `strike_price` — in cents; resolves `ResolvedYes` iff the settled
+    ///   price is `>= strike_price`.
+    /// - `expiry` — unix seconds; `buy`/`sell` close and `settle` opens here.
+    /// - `grace_period` — seconds after `expiry` before `cancel` (the
+    ///   permissionless liveness backstop) becomes callable.
+    /// - `lazer_contract`, `feed_id` — the Pyth Lazer verifier contract and
+    ///   the feed `settle` reads (see the README's "Feed ID" section).
+    /// - `base_fee_bps`, `min_fee_bps` — the fee curve's endpoints: a fresh
+    ///   market charges `base_fee_bps`, decaying toward `min_fee_bps` as
+    ///   `total_supply` grows (see `get_fee`).
+    /// - `treasury` — receives the AMM pool's leftover shares at
+    ///   settlement/cancellation (a `polaris-vault` address, in practice).
+    /// - `initial_liquidity` — seed collateral, and the fixed reference
+    ///   scale for the fee curve.
+    /// - `reflector` — the always-required SEP-40 corroboration leg.
+    /// - `redstone` — the optional second SEP-40 leg (`None` on testnet).
+    ///   When present, corroboration is unanimous, never 2-of-3.
+    ///
+    /// Rejected combinations, checked in this order (the first failing
+    /// check is the error returned, and nothing is stored or transferred):
+    /// - `AlreadyInitialized` — this instance already holds a `Market`.
+    /// - `InvalidStrikePrice` — `strike_price <= 0`: no real price could
+    ///   ever resolve below it, so the outcome would be fixed in advance.
+    /// - `InvalidExpiry` — `expiry` is not strictly in the future: the
+    ///   market would be settleable before anyone could trade it.
+    /// - `InvalidGracePeriod` — `grace_period == 0`: `cancel` would become
+    ///   callable the same instant `settle` does, letting anyone void the
+    ///   market in a race against the honest settlement.
+    /// - `InvalidFeedId` — `feed_id == 0`, the zero value of an unset
+    ///   field rather than a real Lazer feed.
+    /// - `InvalidFeeBps` — `base_fee_bps > MAX_FEE_BPS` (1000 bps = 10%),
+    ///   or `min_fee_bps > base_fee_bps` (the curve would rise with volume
+    ///   instead of decaying).
+    /// - `InvalidLiquidity` — `initial_liquidity <= 0`: an empty pool has
+    ///   no constant-product price at all.
+    /// - `InvalidReflectorConfig` / `InvalidRedstoneConfig` — that leg's
+    ///   `max_staleness_secs` is narrower than the oracle's own live
+    ///   `resolution()`, so every settle attempt would be stale.
+    /// - `ReflectorDecimalsInvalid` / `RedstoneDecimalsInvalid` — that
+    ///   leg's live `decimals()` is outside `2..=30`. The value read here
+    ///   is pinned and re-checked on every `settle` (see
+    ///   `ReflectorDecimalsChanged`/`RedstoneDecimalsChanged`).
+    ///
+    /// Not validated here, and failing as a trap rather than a typed
+    /// error: an oracle `contract` that doesn't implement SEP-40's
+    /// `resolution()`/`decimals()`, and an `admin` without
+    /// `initial_liquidity` of `collateral` to transfer. `tolerance_bps`,
+    /// `lazer_contract` and `treasury` are stored as given.
     #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
