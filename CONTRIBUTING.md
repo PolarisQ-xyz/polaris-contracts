@@ -38,6 +38,11 @@ cargo test --workspace
 cargo build --release --target wasm32v1-none -p polaris-market
 ```
 
+If you change any contract's public interface, including a doc comment on
+a public function or type, also run `scripts/sync-interface-wasm.sh` and
+commit `interface/wasm/`. Otherwise `polaris-interface`'s
+`vendored_specs_match_current_source` test fails in CI.
+
 ## Communication
 
 Discussion happens in GitHub issues and pull requests. There's no
@@ -73,6 +78,7 @@ Prefix the PR title with the area it touches:
 - `vault` — `contracts/vault`
 - `wallet` — `contracts/smart-wallet` or `contracts/smart-wallet-factory`
 - `oracle` — the Reflector/RedStone/Lazer integration code (`ctf-math`'s `sep40` module, the mocks)
+- `interface` — `interface/` (the published `polaris-interface` crate) or `scripts/sync-interface-wasm.sh`
 - `docs` — README/comment-only changes
 - `test` — test-only changes
 - `ci`/`build` — workflow or Cargo config changes

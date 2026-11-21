@@ -1,0 +1,31 @@
+[package]
+name = "polaris-interface"
+# Tracks the contract release whose wasm is vendored in `wasm/` — bump it
+# together with `scripts/sync-interface-wasm.sh`, never on its own. See
+# README.md.
+version = "0.1.0"
+edition = "2021"
+description = "Typed Soroban clients and contract types for the Polaris market, perpetual, vault and smart-wallet contracts"
+license = "MIT"
+repository = "https://github.com/PolarisQ-xyz/polaris-contracts"
+readme = "README.md"
+keywords = ["soroban", "stellar", "prediction-market", "polaris"]
+categories = ["cryptography::cryptocurrencies", "no-std"]
+include = ["src/**/*.rs", "wasm/*.wasm", "wasm/SHA256SUMS", "README.md", "Cargo.toml"]
+
+[lib]
+# rlib only: `contractimport!` generates clients and types, never a
+# `#[contract]` export, so depending on this crate from another contract
+# can't cause the wasm export-symbol collision polaris-vault's
+# `market_contract` doc comment describes.
+crate-type = ["rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+soroban-spec = "26.1.1"
+
+[features]
+testutils = ["soroban-sdk/testutils"]

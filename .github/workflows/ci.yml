@@ -33,6 +33,13 @@ jobs:
             -p polaris-mock-lazer -p polaris-mock-redstone -p polaris-smart-wallet \
             -p polaris-smart-wallet-factory -p polaris-vault -p polaris-perpetual
       - run: cargo test --workspace
+        env:
+          # polaris-interface's vendored_specs_match_current_source
+          # compares interface/wasm/ against the release wasm built above.
+          # Locally it skips a contract that isn't built; here a missing
+          # build must fail, or the drift guard would silently stop
+          # guarding (see interface/README.md).
+          POLARIS_REQUIRE_SPEC_CHECK: "1"
 
   wasm-build:
     name: release WASM builds

@@ -53,6 +53,7 @@ app is at
 - [Engineering notes: soroban-sdk gotchas](#engineering-notes-soroban-sdk-gotchas)
 - [Building & testing](#building--testing)
 - [Deploying](#deploying)
+- [Integrating: polaris-interface](#integrating-polaris-interface)
 - [Contributing](#contributing)
 
 ## Architecture
@@ -81,7 +82,7 @@ each other and the oracle feeds they read.
 
 ## Contracts at a glance
 
-Eight crates, one Cargo workspace:
+Nine crates, one Cargo workspace:
 
 | Crate | Purpose |
 |---|---|
@@ -93,6 +94,7 @@ Eight crates, one Cargo workspace:
 | `contracts/ctf-math` | `rlib`-only shared crate (no `#[contract]`) holding the pure CTF/AMM math, the generic SEP-40 oracle client, and the oracle-corroboration logic both `market` and `perpetual` call. |
 | `contracts/mock-lazer` | Testnet-only stand-in for the real `pyth-lazer-stellar` verifier. **Never deploy to mainnet.** |
 | `contracts/mock-redstone` | Testnet-only stand-in for RedStone's real (mainnet-only) SEP-40 wrapper. **Never deploy to mainnet.** |
+| `interface` | `polaris-interface`: the publishable crate of typed clients and contract types, generated from vendored release wasm. See [Integrating](#integrating-polaris-interface). |
 
 ## Why not the original parimutuel design
 
@@ -675,6 +677,29 @@ stellar contract invoke --id <CONTRACT_ID> --source deployer --network testnet -
 In practice, `polaris-oracle`'s `POST /markets/create` and
 `POST /perpetuals/create` do this deploy+initialize sequence for you against
 the wasm files already checked into that repo — see its README.
+
+## Integrating: polaris-interface
+
+`interface/` is `polaris-interface`
+([#34](https://github.com/PolarisQ-xyz/polaris-contracts/issues/34)), a
+publishable crate of typed clients and contract types for the market,
+perpetual, vault, smart-wallet and factory contracts. A third party
+depends on it like any crate, instead of copying a `.wasm` file into its
+own `contractimport!`:
+
+```rust
+use polaris_interface::market;
+let (yes_bps, no_bps) = market::Client::new(&env, &market_id).get_price();
+```
+
+It follows the convention other published Soroban SDK crates use (e.g.
+Blend's `blend-contract-sdk`): vendor each release wasm in
+`interface/wasm/` and wrap it in `contractimport!`. Its version is the
+contract release it vendors. `scripts/sync-interface-wasm.sh` refreshes
+the wasm and `SHA256SUMS`. A test fails CI if any contract's interface
+(spec, docs included) changes without a re-sync. See
+[interface/README.md](./interface/README.md) for the release steps and for
+generating TypeScript bindings from the same files.
 
 ## Contributing
 
