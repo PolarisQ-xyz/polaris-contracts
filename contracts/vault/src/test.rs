@@ -333,3 +333,244 @@ fn redeem_from_market_collects_the_vaults_treasury_payout() {
     assert_eq!(payout, 10_000, "the vault gets back exactly the seed liquidity it funded, at par, no trading occurred");
     assert_eq!(vault_client.get_balance(), 10_000);
 }
+
+// ---------- batch redemption (#38) ----------
+
+/// Deploys a real `polaris-market` (from its compiled wasm, so metering
+/// below includes VM instantiation) seeded with `liquidity` from the
+/// admin, `treasury` = this vault, settled `ResolvedYes`. With no trading,
+/// the vault's whole claim is the seed: it should redeem exactly
+/// `liquidity`.
+fn settled_market(h: &Harness, liquidity: i128) -> Address {
+    fund(h, &h.admin, liquidity);
+    let lazer_id = h.env.register(MockLazer, ());
+    let reflector_id = h.env.register(mock_reflector::MockReflector, ());
+    let market_id = h.env.register(market_contract::WASM, ());
+    let market_client = MarketClient::new(&h.env, &market_id);
+    let expiry = h.env.ledger().timestamp() + DAY;
+    market_client.initialize(
+        &h.admin,
+        &h.token_id,
+        &1_000_000i128,
+        &expiry,
+        &3_600u64,
+        &lazer_id,
+        &FEED_ID,
+        &100u32,
+        &20u32,
+        &h.vault_id,
+        &liquidity,
+        &OracleFeedConfig {
+            contract: reflector_id.clone(),
+            asset: market_contract::Asset::Other(soroban_sdk::Symbol::new(&h.env, "XLM")),
+            max_staleness_secs: REFLECTOR_MAX_STALENESS_SECS,
+            tolerance_bps: REFLECTOR_TOLERANCE_BPS,
+        },
+        &None,
+    );
+    let now = h.env.ledger().timestamp();
+    h.env.ledger().set_timestamp(expiry);
+    let payload = build_payload(FEED_ID, 2_000_000, -2, expiry * 1_000_000);
+    mock_reflector::MockReflectorClient::new(&h.env, &reflector_id)
+        .set_price(&(2_000_000i128 * 10i128.pow(REFLECTOR_DECIMALS - 2)), &expiry);
+    market_client.settle(&Bytes::from_slice(&h.env, &payload));
+    // Rewind so the next market's `expiry` is still in the future.
+    h.env.ledger().set_timestamp(now);
+    market_id
+}
+
+#[test]
+fn redeem_from_markets_collects_every_market_in_one_call() {
+    let h = setup();
+    let vault = VaultClient::new(&h.env, &h.vault_id);
+    let a = settled_market(&h, 10_000);
+    let b = settled_market(&h, 25_000);
+    let c = settled_market(&h, 7_000);
+
+    let outcomes = vault.redeem_from_markets(&h.admin, &soroban_sdk::vec![&h.env, a, b, c]);
+    assert_eq!(
+        outcomes,
+        soroban_sdk::vec![
+            &h.env,
+            RedeemOutcome::Redeemed(10_000),
+            RedeemOutcome::Redeemed(25_000),
+            RedeemOutcome::Redeemed(7_000),
+        ]
+    );
+    assert_eq!(vault.get_balance(), 42_000);
+}
+
+#[test]
+fn one_failing_market_does_not_revert_the_rest_of_the_batch() {
+    let h = setup();
+    let vault = VaultClient::new(&h.env, &h.vault_id);
+    let good = settled_market(&h, 10_000);
+    let already_collected = settled_market(&h, 5_000);
+    vault.redeem_from_market(&h.admin, &already_collected);
+    assert_eq!(vault.get_balance(), 5_000);
+
+    // Still open: initialized, never settled.
+    fund(&h, &h.admin, 1_000);
+    let open_id = h.env.register(market_contract::WASM, ());
+    MarketClient::new(&h.env, &open_id).initialize(
+        &h.admin,
+        &h.token_id,
+        &1_000_000i128,
+        &(h.env.ledger().timestamp() + DAY),
+        &3_600u64,
+        &h.env.register(MockLazer, ()),
+        &FEED_ID,
+        &100u32,
+        &20u32,
+        &h.vault_id,
+        &1_000i128,
+        &OracleFeedConfig {
+            contract: h.env.register(mock_reflector::MockReflector, ()),
+            asset: market_contract::Asset::Other(soroban_sdk::Symbol::new(&h.env, "XLM")),
+            max_staleness_secs: REFLECTOR_MAX_STALENESS_SECS,
+            tolerance_bps: REFLECTOR_TOLERANCE_BPS,
+        },
+        &None,
+    );
+    let not_a_contract = Address::generate(&h.env);
+    let second_good = settled_market(&h, 3_000);
+
+    let outcomes = vault.redeem_from_markets(
+        &h.admin,
+        &soroban_sdk::vec![&h.env, good, already_collected, open_id.clone(), not_a_contract, second_good],
+    );
+    assert_eq!(
+        outcomes,
+        soroban_sdk::vec![
+            &h.env,
+            RedeemOutcome::Redeemed(10_000),
+            RedeemOutcome::MarketError(market_contract::Error::NothingToRedeem as u32),
+            RedeemOutcome::MarketError(market_contract::Error::NotFinalized as u32),
+            RedeemOutcome::Failed,
+            RedeemOutcome::Redeemed(3_000),
+        ]
+    );
+    // Both successes committed despite three failures between them.
+    assert_eq!(vault.get_balance(), 5_000 + 10_000 + 3_000);
+    // The open market's failed sub-call left it untouched.
+    assert_eq!(MarketClient::new(&h.env, &open_id).get_market().total_supply, 1_000);
+}
+
+#[test]
+fn redeem_from_markets_requires_the_admins_own_authorization() {
+    let h = setup();
+    let vault = VaultClient::new(&h.env, &h.vault_id);
+    let m = settled_market(&h, 10_000);
+    let not_admin = Address::generate(&h.env);
+    let result = vault.try_redeem_from_markets(&not_admin, &soroban_sdk::vec![&h.env, m]);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    assert_eq!(vault.get_balance(), 0);
+}
+
+#[test]
+fn redeem_from_markets_rejects_an_oversized_batch_before_calling_any_market() {
+    let h = setup();
+    let vault = VaultClient::new(&h.env, &h.vault_id);
+    let m = settled_market(&h, 10_000);
+    let mut ids = soroban_sdk::Vec::new(&h.env);
+    for _ in 0..=MAX_REDEEM_BATCH {
+        ids.push_back(m.clone());
+    }
+    let result = vault.try_redeem_from_markets(&h.admin, &ids);
+    assert_eq!(result, Err(Ok(Error::BatchTooLarge)));
+    // Nothing redeemed: the market's own claim is still collectable.
+    assert_eq!(vault.redeem_from_market(&h.admin, &m), 10_000);
+}
+
+#[test]
+fn redeem_from_markets_with_an_empty_list_is_a_no_op() {
+    let h = setup();
+    let vault = VaultClient::new(&h.env, &h.vault_id);
+    assert_eq!(vault.redeem_from_markets(&h.admin, &soroban_sdk::Vec::new(&h.env)).len(), 0);
+}
+
+/// `n` settled markets, then one `redeem_from_markets` over all of them,
+/// returning the resources that call metered. The host's test-only
+/// *shadow* budget (auth-tree recording and event sizing for test
+/// observation; free and unmetered on a real network) is lifted first:
+/// it trips at around 10 nested market calls and then reports a harness
+/// artifact — a panic in the auth-recording hook, or `0` event bytes —
+/// rather than a network limit. The network limits themselves stay
+/// enforced unless `enforce_mainnet_limits` is false.
+struct Metered {
+    footprint_entries: u32,
+    write_entries: u32,
+    instructions: i64,
+    mem_bytes: i64,
+    write_bytes: u32,
+    event_bytes: u32,
+}
+
+fn metered_batch(n: u32, enforce_mainnet_limits: bool) -> (Vec<RedeemOutcome>, Metered) {
+    let h = setup();
+    if !enforce_mainnet_limits {
+        h.env.cost_estimate().disable_resource_limits();
+    }
+    let vault = VaultClient::new(&h.env, &h.vault_id);
+    let mut ids = soroban_sdk::Vec::new(&h.env);
+    for _ in 0..n {
+        ids.push_back(settled_market(&h, 10_000));
+    }
+    h.env.cost_estimate().budget().reset_unlimited();
+    let outcomes = vault.redeem_from_markets(&h.admin, &ids);
+    let r = h.env.cost_estimate().resources();
+    let metered = Metered {
+        // The SDK's own footprint model (what `ledger_entries` enforces).
+        footprint_entries: r.disk_read_entries + r.memory_read_entries + r.write_entries,
+        write_entries: r.write_entries,
+        instructions: r.instructions,
+        mem_bytes: r.mem_bytes,
+        write_bytes: r.write_bytes,
+        event_bytes: r.contract_events_size_bytes,
+    };
+    (outcomes, metered)
+}
+
+#[test]
+fn a_full_size_batch_fits_mainnet_transaction_limits() {
+    // The SDK enforces `InvocationResourceLimits::mainnet()` on every
+    // invocation by default, so this call itself panics if a full batch
+    // ever stops fitting. The explicit asserts below restate the limits
+    // that matter so a regression names the one it broke.
+    let (outcomes, res) = metered_batch(MAX_REDEEM_BATCH, true);
+    assert_eq!(outcomes.len(), MAX_REDEEM_BATCH);
+    for outcome in outcomes.iter() {
+        assert_eq!(outcome, RedeemOutcome::Redeemed(10_000));
+    }
+    assert!(res.footprint_entries <= 100, "footprint entries {} > 100", res.footprint_entries);
+    assert!(res.write_entries <= 50, "write entries {} > 50", res.write_entries);
+    // Also under the older 100M per-transaction instruction limit, not
+    // just today's 600M.
+    assert!(res.instructions <= 100_000_000, "instructions {}", res.instructions);
+    assert!(res.mem_bytes <= 41_943_040, "memory {}", res.mem_bytes);
+    assert!(res.event_bytes <= 16_384, "event bytes {}", res.event_bytes);
+}
+
+/// Measurement harness behind `MAX_REDEEM_BATCH`'s table, not a
+/// regression test: `cargo test -p polaris-vault measure_redeem_batch --
+/// --ignored --nocapture` reprints it. Runs with mainnet limits disabled
+/// so a size past the ceiling is measured instead of panicking; to
+/// measure past `MAX_REDEEM_BATCH` itself (as the table's 11 and 12 rows
+/// were), raise the constant temporarily, since the cap rejects larger
+/// batches before calling any market.
+#[test]
+#[ignore]
+fn measure_redeem_batch_costs() {
+    for n in 1..=MAX_REDEEM_BATCH {
+        let (_, res) = metered_batch(n, false);
+        std::println!(
+            "n={n:2} footprint={:>3} write_entries={:>3} instructions={:>11} mem={:>9} write_bytes={:>6} event_bytes={:>5}",
+            res.footprint_entries,
+            res.write_entries,
+            res.instructions,
+            res.mem_bytes,
+            res.write_bytes,
+            res.event_bytes,
+        );
+    }
+}

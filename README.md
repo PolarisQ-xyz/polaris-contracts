@@ -390,6 +390,20 @@ independently collateralized as it already was.
   draws on), or an LP redemption.
 - `redeem_from_market(admin, market_id)` — collects the vault's own payout
   from a settled/cancelled market it was `treasury` for.
+- `redeem_from_markets(admin, market_ids)` — the same for up to
+  `MAX_REDEEM_BATCH` (10) markets in one transaction
+  ([#38](https://github.com/PolarisQ-xyz/polaris-contracts/issues/38)).
+  Returns one `RedeemOutcome` per market, in order: `Redeemed(payout)`,
+  `MarketError(code)` (e.g. `21` `NotFinalized`, `22` `NothingToRedeem`),
+  or `Failed` (not a market, or it trapped). Each `redeem` runs as a `try_`
+  sub-call, so one failing market rolls back only itself. The cap is
+  measured, not picked: against real `polaris-market` wasm under the SDK's
+  mainnet limits, each market adds 8 footprint entries, so 11 markets is
+  the true ceiling (98 of 100) and 12 is rejected (106). CPU is nowhere
+  close: about 1.2M instructions per market. 10 leaves headroom for
+  footprint entries a test can't see. Table and re-measure instructions:
+  `MAX_REDEEM_BATCH`'s doc comment; regression test:
+  `a_full_size_batch_fits_mainnet_transaction_limits`.
 
 **v1 is deliberately simple, stated up front**: single-admin-owned capital,
 not fractional LP shares. Multiple depositors can `deposit`, but there's no
