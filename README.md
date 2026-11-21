@@ -617,7 +617,7 @@ live.
 ## Building & testing
 
 ```sh
-# unit tests (native target; 100 across the whole workspace)
+# unit tests (native target; 131 across the whole workspace)
 cargo test --workspace
 
 # release WASM (requires `rustup target add wasm32v1-none`)
@@ -633,14 +633,16 @@ shasum -a 256 target/wasm32v1-none/release/*.wasm
 
 | Crate | Unit tests |
 |---|---|
-| `polaris-market` | 48 |
-| `polaris-perpetual` | 22 |
+| `polaris-market` | 51 |
+| `polaris-perpetual` | 25 |
+| `polaris-vault` | 17 (+1 ignored measurement harness) |
 | `polaris-smart-wallet` | 11 |
+| `polaris-oracle-config` | 11 |
 | `polaris-smart-wallet-factory` | 9 |
-| `polaris-vault` | 6 |
+| `polaris-interface` | 3 (+1 doctest) |
 | `polaris-mock-redstone` | 3 |
 | `polaris-mock-lazer` | 1 |
-| **Total** | **100** |
+| **Total** | **131** |
 
 Current build (regenerate after any contract change — `polaris-oracle`'s
 `MARKET_WASM_HASH`/`PERPETUAL_WASM_HASH` must track whatever hash is
@@ -648,13 +650,16 @@ actually uploaded):
 
 | Contract | Size | SHA-256 |
 |---|---|---|
-| `polaris_market.wasm` | 59,407 bytes | `8ad8d17ad08c78f6afb52152fe4976422102e2c9f125716532a4a0396ccb4918` |
-| `polaris_perpetual.wasm` | 57,367 bytes | `b62909fa2c78b083a8973b7b733b0ce9e4b8cdb1efd1d0169f61c93370af9727` |
-| `polaris_mock_lazer.wasm` | 649 bytes | `7840d96cc309b74e37b5ec22f37e978eaec0aef3feb00146a6e8ce3bdee7087d` |
-| `polaris_mock_redstone.wasm` | 7,280 bytes | `0db6ff0394999bb28e97a786c5b64891f341290aa323d8a8aec78b711eb28cdf` |
-| `polaris_smart_wallet.wasm` | 27,049 bytes | `bb2e397ba9d56cb58649941576c51e452063554bb43d15d4dfbd29987b1f7dbf` |
-| `polaris_smart_wallet_factory.wasm` | 7,583 bytes | `d64cd44f402db8fb657e8256b20ef7c1b89ebb011bf5adf7e48e3ca335729710` |
-| `polaris_vault.wasm` | 10,568 bytes | `5847a7781556d7c4e727e63fe48a84d6bed9ff6c34686e6a0b09a03d3c925c3d` |
+| `polaris_market.wasm` | 63,067 bytes | `8b9affbb95c698dd26b7a981797bb80c0298219066de26b5c526fc03422ad068` |
+| `polaris_perpetual.wasm` | 60,343 bytes | `37dee64443ac6b312ebb006433ebf0fa8590e925ab667a236cdb7ce0bd5b72d3` |
+| `polaris_mock_lazer.wasm` | 855 bytes | `c0848b74e840eece46de06e424ea99e75467ed3ce80b36e4f9c975395978ce40` |
+| `polaris_mock_redstone.wasm` | 7,465 bytes | `8c77fc03cf73ba92c3df188b73b9c54357358041c0ccc20701c91d1a198ef2ee` |
+| `polaris_smart_wallet.wasm` | 28,307 bytes | `438833c472524aa6b91d50451fc8b9267a9aea74f64e6e3a00cad0ff7d859986` |
+| `polaris_smart_wallet_factory.wasm` | 7,768 bytes | `c72006a7c649cacc291fba664ff6f31f3649c1f74c3756e7beccdf2877e13523` |
+| `polaris_vault.wasm` | 18,579 bytes | `c2968db2b7b53114193571d9f1dfdd7bedd837f135cb57b407e97f7e039916d6` |
+
+Built with rustc 1.95.0. These match `interface/wasm/SHA256SUMS` for the
+five contracts `polaris-interface` vendors.
 
 ## Deploying
 
