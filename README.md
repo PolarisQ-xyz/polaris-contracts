@@ -82,7 +82,7 @@ each other and the oracle feeds they read.
 
 ## Contracts at a glance
 
-Nine crates, one Cargo workspace:
+Ten crates, one Cargo workspace:
 
 | Crate | Purpose |
 |---|---|
@@ -95,6 +95,7 @@ Nine crates, one Cargo workspace:
 | `contracts/mock-lazer` | Testnet-only stand-in for the real `pyth-lazer-stellar` verifier. **Never deploy to mainnet.** |
 | `contracts/mock-redstone` | Testnet-only stand-in for RedStone's real (mainnet-only) SEP-40 wrapper. **Never deploy to mainnet.** |
 | `interface` | `polaris-interface`: the publishable crate of typed clients and contract types, generated from vendored release wasm. See [Integrating](#integrating-polaris-interface). |
+| `tools/oracle-config` | `polaris-oracle-config`: a CLI that builds validated `OracleFeedConfig`/`PriceOracleConfig` JSON for `initialize`. See [Deploying](#deploying). |
 
 ## Why not the original parimutuel design
 
@@ -673,6 +674,49 @@ stellar contract invoke --id <CONTRACT_ID> --source deployer --network testnet -
 # where no RedStone contract exists yet. On mainnet, pass e.g.:
 #   --redstone '{"contract":"CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF","asset":{"Stellar":"<native XLM SAC>"},"max_staleness_secs":600,"tolerance_bps":150}'
 ```
+
+### Oracle config without hand-written JSON
+
+`polaris-oracle-config` (`tools/oracle-config`,
+[#35](https://github.com/PolarisQ-xyz/polaris-contracts/issues/35)) builds
+the `--reflector`/`--redstone` (market) and `--price_oracle` (perpetual)
+values from validated inputs, and prompts for anything missing when run in
+a terminal:
+
+```sh
+cargo build --release -p polaris-oracle-config
+CFG=target/release/polaris-oracle-config
+
+# The deploy example above, without the hand-written --reflector blob:
+stellar contract invoke --id <CONTRACT_ID> --source deployer --network testnet -- \
+  initialize --admin <ADMIN> ... --initial_liquidity 10000000000 \
+  --reflector "$($CFG feed --network testnet --provider reflector \
+                  --max-staleness-secs 600 --tolerance-bps 150)" \
+  --redstone null
+
+# Each prints one line of JSON on stdout:
+$CFG feed --network mainnet --provider redstone --max-staleness-secs 600 --tolerance-bps 150
+$CFG price-oracle --network mainnet --lazer-contract <LAZER_ID> --feed-id <ID> \
+  --reflector-contract <REFLECTOR_ID> --reflector-max-staleness-secs 600 --reflector-tolerance-bps 150 \
+  --redstone-max-staleness-secs 600 --redstone-tolerance-bps 150
+$CFG feed   # no flags in a terminal: prompts for each value
+```
+
+What it catches before anything reaches the chain:
+
+- Contract addresses are checked as `C...` strkeys, checksum included, so a
+  typo fails here instead of at `initialize`.
+- Each provider gets the asset variant it really uses for XLM: Reflector
+  `Other("XLM")`, RedStone `Stellar(<that network's native XLM SAC>)`.
+- `--contract` defaults to this repo's known deployments (Reflector on
+  testnet, RedStone on mainnet).
+- `tolerance_bps` must be within `1..=10000`, `max_staleness_secs` must be
+  above zero, and `feed_id` must be non-zero.
+
+Its tests parse the emitted JSON with `soroban-spec-tools` (the parser the
+`stellar` CLI itself uses) against the released `initialize` signatures.
+One thing it can't check offline: `max_staleness_secs` must be at least
+the oracle's live `resolution()`. `initialize` itself rejects that.
 
 In practice, `polaris-oracle`'s `POST /markets/create` and
 `POST /perpetuals/create` do this deploy+initialize sequence for you against

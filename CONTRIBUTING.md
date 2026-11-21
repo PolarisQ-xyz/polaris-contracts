@@ -79,6 +79,7 @@ Prefix the PR title with the area it touches:
 - `wallet` — `contracts/smart-wallet` or `contracts/smart-wallet-factory`
 - `oracle` — the Reflector/RedStone/Lazer integration code (`ctf-math`'s `sep40` module, the mocks)
 - `interface` — `interface/` (the published `polaris-interface` crate) or `scripts/sync-interface-wasm.sh`
+- `tools` — `tools/` (e.g. `polaris-oracle-config`)
 - `docs` — README/comment-only changes
 - `test` — test-only changes
 - `ci`/`build` — workflow or Cargo config changes
