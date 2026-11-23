@@ -323,6 +323,19 @@ as `total_supply` grows (more collateral locked via `split`/`buy`), the fee
 compresses toward `min_fee_bps` automatically. Query the current value with
 `get_fee()` rather than recomputing it elsewhere.
 
+**Worked numerical example.** Suppose a market is initialized with
+`initial_liquidity = 1,000 XLM` (`10_000_000_000` stroops),
+`base_fee_bps = 100` (1.00%), and `min_fee_bps = 20` (0.20%). The tunable
+spread above the floor is `base_fee_bps - min_fee_bps = 80 bps`:
+
+| Pool stage | `total_supply` | Ratio `initial_liquidity / total_supply` | Formula `20 + floor(80 × ratio)` | `effective_fee_bps` |
+|---|---|---|---|---|
+| Freshly seeded (1× seed) | `1,000 XLM` | `1.00` | `20 + 80` | **`100 bps` (1.00%)** |
+| Doubly funded (2× seed) | `2,000 XLM` | `0.50` | `20 + 40` | **`60 bps` (0.60%)** |
+| 5× seed depth | `5,000 XLM` | `0.20` | `20 + 16` | **`36 bps` (0.36%)** |
+| 10× seed depth | `10,000 XLM` | `0.10` | `20 + 8` | **`28 bps` (0.28%)** |
+| 100× seed depth | `100,000 XLM` | `0.01` | `20 + 0` (integer floor) | **`20 bps` (0.20% floor)** |
+
 **Adjusting a live curve is decrease-only.** `set_fee_curve(base_fee_bps,
 min_fee_bps)` (admin-gated, `market` and `perpetual`, `Open` only) can
 lower either bound, but rejects any increase with `FeeIncreaseNotAllowed`.
