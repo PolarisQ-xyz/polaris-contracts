@@ -18,7 +18,7 @@ jobs:
         with:
           targets: wasm32v1-none
       - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
-      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2.0.0
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       # `just test` builds polaris-market's wasm first, then the rest, then
       # runs the workspace tests — the `contractimport!` build order lives in
       # the justfile, not here (see contracts/vault/src/lib.rs for why).
@@ -93,7 +93,7 @@ jobs:
         with:
           targets: wasm32v1-none
       - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab # v2.7.5
-      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2.0.0
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       # Build order (polaris-market first) is encoded in the justfile.
       - run: just build-wasm
 
@@ -106,7 +106,7 @@ jobs:
         with:
           toolchain: 1.91.0
       - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@v4
       # Keeps the `release-with-logs` profile (Cargo.toml) from rotting: it is
       # only for diagnostic testnet deploys, never mainnet, but it must still
       # compile. Same ordering constraint as the wasm-build job above, encoded
