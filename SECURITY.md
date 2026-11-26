@@ -1,44 +1,41 @@
-# Security policy
-
-These contracts custody real collateral. If you find a vulnerability, please
-report it privately rather than opening a public issue or PR.
-
-## Reporting
-
-Use this repository's **Security → Report a vulnerability** (GitHub private
-vulnerability reporting) at
-<https://github.com/PolarisQ-xyz/polaris-contracts/security/advisories/new>.
-If that isn't available to you, contact a maintainer privately through GitHub
-and ask for a private channel — do not disclose the details in a public
-issue.
-
-Include the affected contract/version or contract ID, the steps to reproduce
-(or a minimal test), and the impact you believe it has. Please give us a
-reasonable window to investigate and ship a fix before disclosing publicly.
-
-## Response expectations
-
-- **Acknowledgement:** within 72 hours of a private report.
-- **Triage and severity assessment:** within 7 days; we'll tell you whether
-  we've reproduced it and what we're doing about it.
-- **Fix and disclosure:** critical issues affecting funds are prioritized and
-  coordinated with the reporter; non-critical issues follow the normal PR
-  process. We'll credit reporters who want it when the advisory is published.
-
-This is a best-effort commitment by a small maintainer team, not a guarantee.
+# Security Policy
 
 ## Scope
 
-In scope: the contract code under `contracts/` (market, perpetual, vault,
-smart wallet, factory), the shared oracle math in `contracts/ctf-math`, and the
-deployment/oracle tooling in `tools/` and `scripts/` where it affects funds or
-oracle configuration. Issues with a demonstrable impact on collateral,
-settlement correctness, access control, or key/origin handling are the highest
-priority.
+This disclosure policy covers all Soroban smart contracts and companion Rust crates in `PolarisQ-xyz/polaris-contracts`:
 
-Out of scope: testnet instances and demo frontends, third-party oracle
-contracts and their feeds, issues requiring a compromised admin key by
-definition, and theoretical findings with no demonstrated impact. Report
-those through the normal issue tracker if they're still worth tracking.
+- `contracts/market` (`polaris-market`)
+- `contracts/perpetual` (`polaris-perpetual`)
+- `contracts/vault` (`polaris-vault`)
+- `contracts/smart-wallet` (`polaris-smart-wallet`) and `contracts/smart-wallet-factory` (`polaris-smart-wallet-factory`)
+- `contracts/ctf-math` (`polaris-ctf-math`)
+- `interface` (`polaris-interface`) and `tools/oracle-config` (`polaris-oracle-config`)
 
-For the project's development and review process, see [CONTRIBUTING.md](./CONTRIBUTING.md).
+High-priority findings include any violation of the core collateral solvency invariant (`collateral.balance(contract) == total_supply`), unauthorized fund movement or admin bypass, oracle verification / corroboration bypass, WebAuthn origin or signature verification flaws, and permanent denial of service (traps or locked redemptions).
+
+## Reporting a Vulnerability
+
+**Do not open a public GitHub issue or pull request for suspected security vulnerabilities.**
+
+Please report security findings privately through one of the following channels:
+
+1. **GitHub Private Vulnerability Reporting (Preferred):** Use the [**Report a vulnerability**](https://github.com/PolarisQ-xyz/polaris-contracts/security/advisories/new) tab on this repository to open a private security advisory.
+2. **Direct Maintainer Contact:** If GitHub Security Advisories are unavailable, contact the Polaris maintainers privately via the organization profile at [https://github.com/PolarisQ-xyz](https://github.com/PolarisQ-xyz).
+
+When submitting a report, please include:
+
+- The affected contract(s), entrypoint(s), and commit SHA.
+- The exact invariant or authorization boundary that is violated.
+- A minimal reproducible Soroban test case (`cargo test`) or step-by-step reproduction sequence demonstrating the impact.
+
+## Response & Remediation Timeline
+
+| Stage | Target SLA |
+|---|---|
+| Initial acknowledgment | Within **48 hours** of receipt |
+| Triage & severity confirmation | Within **5 business days** |
+| Fix / fresh-instance redeploy & coordinated disclosure | Within **14–30 days**, depending on active market expiry windows and user wallet migration requirements |
+
+## Safe Harbor & Coordinated Disclosure
+
+We ask that you give maintainers a reasonable window to remediate and (where required by Soroban's immutable-instance or factory-generation model) deploy replacement contract instances before making any details public. Good-faith security research conducted against local test environments or your own isolated testnet deployments will not be treated as hostile action.
