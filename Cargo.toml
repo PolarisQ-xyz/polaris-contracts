@@ -3,8 +3,16 @@ resolver = "2"
 members = ["contracts/*", "interface", "tools/*"]
 
 [workspace.dependencies]
+# soroban-sdk is intentionally pinned to 26.1.0 (see issue #57).
+# soroban-sdk major versions track Stellar protocol versions, so bumping is a
+# deliberate decision tied to the target network's protocol, not a routine bump.
+# Open questions to confirm before changing:
+#   - which Stellar protocol version does 26.1.0 correspond to?
+#   - which protocol versions do later majors (27.x, 28.x, 29.x, 30.x) map to?
+#   - has the targeted testnet/mainnet moved past what 26.1.0 supports?
+# Do not bump reflexively (e.g. to 30.0.0-rc.1) without answering the above.
 soroban-sdk = "26.1.0"
-pyth-lazer-stellar-sdk = "0.3"
+pyth-lazer-stellar-sdk = "0.4"
 
 [profile.release]
 opt-level = "z"

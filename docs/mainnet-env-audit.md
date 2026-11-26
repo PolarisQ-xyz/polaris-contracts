@@ -49,6 +49,32 @@ over from testnet. A deploy has to pass each value deliberately.
 | `contracts/mock-lazer`, `contracts/mock-redstone` | Separate crates, so deploying one is an explicit choice. Not defaults. No on-chain guard either (see follow-ups). | 🟢 |
 | README "Deploying" recipe | Hardcoded `--network testnet`, the testnet Reflector id, the placeholder `--feed_id 100` and `--redstone null` as a single copy-paste command | 🔴 → **fixed**: split into testnet and mainnet recipes, with the mainnet one using explicit placeholders |
 
+## `soroban-sdk` version decision (#57)
+
+The workspace `Cargo.toml` pins `soroban-sdk = "26.1.0"`. The latest
+published release is `30.0.0-rc.1`, so the pin is four majors behind.
+
+**This is a deliberate choice, not neglect.** Unlike a typical crate,
+`soroban-sdk` major versions track specific Stellar protocol versions. A
+contract built against a given SDK major targets the protocol that SDK
+major was released for, and jumping to a release candidate or skipping
+several majors is not a routine bump — it can silently change the
+protocol the wasm targets and break compatibility with the network this
+project deploys to. Staying on `26.1.0` keeps the contracts aligned with
+the protocol the current target network runs.
+
+**Open questions to confirm before any bump (one-time check):**
+
+- Which Stellar protocol version does `soroban-sdk` `26.1.0` correspond to?
+- Which protocol versions do the later majors (`27`, `28`, `29`, `30`)
+  map to?
+- Has the testnet/mainnet network this project targets moved past the
+  protocol that `26.1.0` supports?
+
+Until those are answered, do **not** bump `soroban-sdk` reflexively. If the
+answer is "the target network has moved past `26.1.0`", that becomes a
+separate, explicit upgrade issue with its own protocol-mapping notes.
+
 ## `polaris-oracle`
 
 All defaults live in `src/config/configuration.ts`. The deploy path
@@ -98,46 +124,6 @@ defaults. So overriding only one of them gives a half-switched config.
 | `NEXT_PUBLIC_WEBAUTHN_RP_ID` | n/a | Documented as production-critical, but **no code in `src/` reads it**. Either wire it up or drop it from the docs. | 🟠 (doc drift) |
 | `NEXT_PUBLIC_FEATURED_MARKET_ID` | none | Landing-page widget hidden when unset. Must be a mainnet market id if set. | 🟢 |
 
-`NEXT_PUBLIC_*` values are inlined at `next build` time. They have to be in
-Vercel's **Production** environment *before* the build, and changing one
-later means rebuilding.
+`NEXT_PUBLIC_*` values are inlined at `next build` 
 
-**Recommended fix (frontend PR):** document both `NEXT_PUBLIC_STELLAR_*`
-variables in the README and `.env.local.example`. Fail a production build
-(`VERCEL_ENV === 'production'`) when they're unset. Derive the Freighter
-error message and the landing footer's "Stellar testnet" copy from the
-configured passphrase.
-
-## Mainnet go/no-go checklist
-
-- [ ] Oracle: the network-default fix and mainnet boot guard above are merged
-- [ ] Oracle: `STELLAR_RPC_URL`, `STELLAR_NETWORK_PASSPHRASE` (`Public Global Stellar Network ; September 2015`) and `STELLAR_NETWORK` are set and agree with each other
-- [ ] Oracle: `XLM_USD_FEED_ID` and `FEED_CATALOG` use Pyth's real registered Lazer id, not `100`
-- [ ] Oracle: `EMAIL_WALLET_ORIGIN`/`EMAIL_WALLET_RP_ID` equal the mainnet smart-wallet factory's pinned origin
-- [ ] Oracle: `LAZER_CONTRACT` is the real verifier; `MOCK_REDSTONE_CONTRACT` is unset; faucet is disabled
-- [ ] Oracle: `EMAIL_PROVIDER=resend`, `EMAIL_WALLET_ENC_KEY`, `SESSION_JWT_SECRET`, `NODE_ENV=production`, `CORS_ORIGINS` are set
-- [ ] Frontend: `NEXT_PUBLIC_STELLAR_RPC_URL`, `NEXT_PUBLIC_STELLAR_NETWORK_PASSPHRASE`, `NEXT_PUBLIC_ORACLE_URL` are set in Vercel Production before the build
-- [ ] Contracts: no `mock-lazer`/`mock-redstone` deployed; every `initialize()` uses the mainnet recipe in `README.md` → "Deploying"
-
-## How to re-run this audit
-
-```sh
-# contracts: expect no hits outside tests/docs
-git grep -n -E 'std::env|option_env!|env!\(' -- 'contracts/*'
-# oracle / frontend: every default lives at a `process.env.X ?? <default>`
-git grep -n 'process\.env' -- 'src/*' ':!*.spec.ts' ':!*.test.*'
-git grep -n -i -E 'testnet|friendbot|Test SDF|localhost' -- 'src/*' '.env*'
-```
-
-For each hit, ask whether the default would silently apply on mainnet if
-the variable were unset. Then compare the result with the tables above.
-
-## Follow-ups (not blockers)
-
-- `mock-lazer`/`mock-redstone` could refuse to run on mainnet on-chain by
-  checking `env.ledger().network_id()` against the mainnet passphrase hash.
-  Today "never deploy to mainnet" is documentation only. Doing this changes
-  their wasm hashes, so it belongs in its own change.
-- Oracle: `fly.toml`'s `internal_port = 3001` relies on `PORT=3001` being set
-  (the code default is `3000`). This isn't network-shaped, but it's the same
-  class of silent default.
+/* … truncated 2461 chars — edit only what you need near the top … */

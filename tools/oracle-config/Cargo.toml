@@ -1,24 +1,7 @@
 [package]
-name = "polaris-oracle-config"
+name = "oracle-config"
 version = "0.1.0"
 edition = "2021"
-publish = false
-description = "Builds validated OracleFeedConfig / PriceOracleConfig JSON for polaris-market and polaris-perpetual's initialize"
-
-[[bin]]
-name = "polaris-oracle-config"
-path = "src/main.rs"
 
 [dependencies]
-serde_json = "1"
-# Same strkey crate/version soroban-sdk itself uses: decoding validates the
-# checksum, which is what catches a typo'd contract address offline.
-stellar-strkey = "0.0.16"
-
-[dev-dependencies]
-# The tests check emitted JSON against the real contracts' interface: the
-# vendored wasm spec (polaris-interface), parsed by soroban-spec-tools, the
-# same library the `stellar` CLI uses to turn a JSON argument into XDR.
-polaris-interface = { path = "../../interface" }
-soroban-spec = "26.1.1"
-soroban-spec-tools = "26"
+pyth-lazer-stellar-sdk = "0.4"

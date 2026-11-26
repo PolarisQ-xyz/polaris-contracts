@@ -64,3 +64,28 @@ cross-link it here.
 Until a contract ships with a deliberate, authorized upgrade hook, treat
 "fixed in the repo" and "fixed on the deployed instance" as two different
 states.
+
+## Pinned dependency: `soroban-sdk = "26.1.0"`
+
+The workspace `Cargo.toml` pins `soroban-sdk = "26.1.0"`. The latest published
+release is `30.0.0-rc.1`, so the pin is four majors behind. This is recorded
+here as a **deliberate decision to track**, not as neglect and not as a
+proposal to bump now.
+
+Unlike a typical crate, soroban-sdk majors generally track specific Stellar
+protocol versions. Jumping to a release candidate, or skipping several majors,
+is not a routine bump and could easily be wrong to do reflexively — the SDK
+version must match the protocol the target network actually runs.
+
+### Open questions (to confirm, not assume)
+
+- Which Stellar protocol version does `26.1.0` correspond to?
+- Which protocol does each later major (27, 28, 29, 30) map to?
+- Has the testnet/mainnet this project targets moved past what `26.1.0`
+  supports?
+
+If staying on `26.1.0` already matches the target network's protocol, it is
+the correct choice and should stay pinned. If the target network has moved
+past it, the gap has grown unintentionally and a coordinated bump (SDK +
+contracts + redeploy) is warranted. Either way, record the outcome here so the
+next reader knows the pin was checked, not forgotten.
