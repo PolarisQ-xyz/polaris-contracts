@@ -23,8 +23,8 @@ This is one of three repos that make up Polaris:
 
 | Contract | Address |
 |---|---|
-| Capital-efficiency vault | [`CDAZVYBSONMRKSXILQGYWIMDHIAWNWISBOEEPU6EG7RUBJPGHP6VZZBW`](https://stellar.expert/explorer/testnet/contract/CDAZVYBSONMRKSXILQGYWIMDHIAWNWISBOEEPU6EG7RUBJPGHP6VZZBW) (redeployed — see `polaris-oracle`'s README, bug 16, for why the original instance was abandoned rather than reused; decision criteria in [Redeploy vs. patch](./docs/redeploy-vs-patch.md)) |
-| Smart-wallet factory | [`CCBVJYZWNEOQTY6KVCPZ2G6YJ7QTBPUEO6IE6YT7J2QZDQW2Q5Z43VQY`](https://stellar.expert/explorer/testnet/contract/CCBVJYZWNEOQTY6KVCPZ2G6YJ7QTBPUEO6IE6YT7J2QZDQW2Q5Z43VQY) (redeployed — see the smart-wallet section's "relying-party `origin`/`type` checks" below for why the prior instance's wallets run code with no origin binding and are unaffected, not reused; decision criteria in [Redeploy vs. patch](./docs/redeploy-vs-patch.md)) |
+| Capital-efficiency vault | [`CDAZVYBSONMRKSXILQGYWIMDHIAWNWISBOEEPU6EG7RUBJPGHP6VZZBW`](https://stellar.expert/explorer/testnet/contract/CDAZVYBSONMRKSXILQGYWIMDHIAWNWISBOEEPU6EG7RUBJPGHP6VZZBW) (redeployed — see `polaris-oracle`'s README, bug 16, and [docs/redeploy-vs-patch.md](./docs/redeploy-vs-patch.md) for why the original instance was abandoned rather than reused) |
+| Smart-wallet factory | [`CCBVJYZWNEOQTY6KVCPZ2G6YJ7QTBPUEO6IE6YT7J2QZDQW2Q5Z43VQY`](https://stellar.expert/explorer/testnet/contract/CCBVJYZWNEOQTY6KVCPZ2G6YJ7QTBPUEO6IE6YT7J2QZDQW2Q5Z43VQY) (redeployed — see the smart-wallet section's "relying-party `origin`/`type` checks" below for why the prior instance's wallets run code with no origin binding and are unaffected, not reused) |
 | Mock RedStone (testnet stand-in) | [`CAFAVGX6VUIRPK2KDCK7QGJEOOBM2EWCIA5UJBLOR2T7HZINKVKYRYTI`](https://stellar.expert/explorer/testnet/contract/CAFAVGX6VUIRPK2KDCK7QGJEOOBM2EWCIA5UJBLOR2T7HZINKVKYRYTI) |
 
 Individual market/perpetual contracts are deployed on demand by
@@ -116,9 +116,6 @@ Polaris instead uses a **fully-collateralized conditional-token market**
 with a **constant-product AMM** (Uniswap-style `x*y=k`, not LMSR — LMSR needs
 floating-point `exp`/`ln`, which isn't safe to hand-roll in an integer-only
 WASM contract) for continuous pricing between the two outcome shares.
-Multi-outcome/categorical markets are out of scope for v1; the decision and
-the trigger for revisiting it are recorded in
-`docs/issues/29-multi-outcome-markets.md` (#29).
 
 ## Core mechanism
 
@@ -242,9 +239,7 @@ Errors cross the wasm boundary as bare `u32` codes, so a caller without
 the source sees only a number and a variant name. The name alone has to say
 which condition fired. Two pairs in `contracts/market` used to read as
 synonyms. They were renamed in
-[#58](https://github.com/PolarisQ-xyz/polaris-contracts/issues/58), and the
-same decimals pairs in `contracts/perpetual` were renamed in
-[#59](https://github.com/PolarisQ-xyz/polaris-contracts/issues/59):
+[#58](https://github.com/PolarisQ-xyz/polaris-contracts/issues/58):
 
 | Code | Old name | New name | Fires when |
 |---|---|---|---|
@@ -255,8 +250,6 @@ same decimals pairs in `contracts/perpetual` were renamed in
 | 32 | `RedstoneDecimalsInvalid` | `RedstoneDecimalsOutOfRange` | as 26, RedStone leg |
 | 33 | `RedstoneDecimalsChanged` | `RedstoneDecimalsDriftedSinceInit` | as 29, RedStone leg |
 
-The perpetual equivalents keep their own codes unchanged (22, 25, 28, 29).
-
 **Breaking change to the error ABI (names, not codes).** Every code is
 unchanged (`renamed_error_variants_keep_their_wire_codes` pins them), so a
 deployed instance and anything matching on numbers is unaffected. The
@@ -264,7 +257,8 @@ contract spec's variant names did change, so generated bindings (Rust via
 `polaris-interface`, TypeScript via `stellar contract bindings`) and any
 client matching on the old names must be regenerated or updated. That makes
 the next `polaris-interface` release a minor-version bump (0.2.0). See
-`interface/README.md`.
+`interface/README.md`. `contracts/perpetual` has the same two decimals
+pairs under its own codes and is not renamed here.
 
 ## Emergency pause
 
@@ -327,26 +321,7 @@ a curve: `effective_fee_bps = min_fee_bps + (base_fee_bps - min_fee_bps) *
 initial_liquidity / total_supply`. A fresh market charges `base_fee_bps`;
 as `total_supply` grows (more collateral locked via `split`/`buy`), the fee
 compresses toward `min_fee_bps` automatically. Query the current value with
-`get_fee()` rather than recomputing it elsewhere. `get_fee()` is available
-only while a market is `Open`; after settlement/cancellation (or perpetual
-`terminate`) it returns the same not-open error as `get_price()` instead of
-a meaningless value, including when full redemption has made
-`total_supply == 0`.
-
-Worked example: `base_fee_bps = 100` (1%), `min_fee_bps = 20` (0.2%), seed
-`initial_liquidity = 10_000` collateral units. With
-`spread = base − min = 80` bps:
-
-| `total_supply` | Supply vs. seed | Computation (`min + spread × seed ÷ supply`, integer floor) | Fee |
-|---|---|---|---|
-| `10_000` | 1× (fresh) | `20 + 80 × 10_000 / 10_000 = 20 + 80` | `100` bps (1%) |
-| `20_000` | 2× | `20 + 80 × 10_000 / 20_000 = 20 + 40` | `60` bps (0.6%) |
-| `100_000` | 10× | `20 + 80 × 10_000 / 100_000 = 20 + 8` | `28` bps (0.28%) |
-| `∞` (limit) | — | spread term → 0 | `20` bps (0.2%) |
-
-So doubling the locked collateral cuts the fee almost in half; another 5×
-gets within 8 bps of the floor. The division floors, so at non-divisible
-ratios the fee is a fraction of a bp below the exact curve — never above it.
+`get_fee()` rather than recomputing it elsewhere.
 
 **Adjusting a live curve is decrease-only.** `set_fee_curve(base_fee_bps,
 min_fee_bps)` (admin-gated, `market` and `perpetual`, `Open` only) can
@@ -595,8 +570,7 @@ vector whose `type` is `"webauthn.create"` instead of `"webauthn.get"`. See
 Deployed as a fresh factory instance (existing wallets from the prior
 factory keep running their original wasm, with no origin binding —
 unaffected, same "redeploy rather than retrofit" pattern as the vault's
-admin-rotation incident above — see [Redeploy vs. patch](./docs/redeploy-vs-patch.md)
-for the decision criteria) — the address listed under
+admin-rotation incident above; see [docs/redeploy-vs-patch.md](./docs/redeploy-vs-patch.md)) — the address listed under
 [Live on testnet](#live-on-testnet).
 
 ## Factory generations and migration
@@ -747,9 +721,7 @@ to be set once at `initialize()` with no rotation function at all —
 confirmed the hard way when a production signing-key rotation (see
 `polaris-oracle`'s README, bug 16) permanently locked the first deployed
 vault instance out of its own funds, with no way to recover access short
-of abandoning it and deploying a fresh one (see
-[Redeploy vs. patch](./docs/redeploy-vs-patch.md) for why a fresh instance was
-required). Fixed with a two-step
+of abandoning it and deploying a fresh one. Fixed with a two-step
 `propose_admin(current_admin, proposed)` / `accept_admin(proposed)` pair
 (not a single-call `set_admin`): the proposed address must show up and
 sign `accept_admin` with its own key before the rotation takes effect, so
